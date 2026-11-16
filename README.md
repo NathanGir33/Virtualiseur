@@ -17,7 +17,7 @@ Hyperviseur de type 2 pour Windows 11, dans l'esprit de VirtualBox, construit su
 - **Disque virtio-blk** sur un thread d'E/S dédié, ou disque IDE. Le **CD-ROM ATAPI** transfère en DMA.
 - **Réseau virtio-net**, avec les modes de VirtualBox et une adresse MAC propre à chaque VM :
   - **NAT** (libslirp) : DHCP, DNS et accès Internet, avec redirection de ports depuis 127.0.0.1, sans pilote ni droits administrateur ;
-  - **accès par pont** avec Npcap : la VM est sur le réseau local. Sur Ethernet le pont est transparent ; sur Wi-Fi il traduit les adresses MAC, mais beaucoup de pilotes Wi-Fi refusent l'injection de trames (dont l'Intel AX201 testé) ;
+  - **accès par pont** avec Npcap : la VM est sur le réseau local. Sur Ethernet le pont est transparent ; sur Wi-Fi il traduit les adresses MAC. L'injection de trames dépend du pilote **et** du réseau : avec l'Intel AX201 testé, elle est refusée sur certains réseaux et fonctionne sur d'autres (par exemple un partage de connexion) ;
   - **réseau interne** entre VM d'un même nom, porté par du multicast local sur 127.0.0.1 ;
   - **réseau privé hôte** (machine isolée, joignable par redirections de ports) et **câble débranché**.
 - **ACPI** : arrêt propre via le bouton d'alimentation, extinction S5, redémarrage, timer PM et routage PCI (`_PRT`).
@@ -78,7 +78,6 @@ src/
     ui/          fenêtre d'affichage
   app/VirtualiseurManager/   gestionnaire de VM (Win32) : bibliothèque (VmLibrary),
                              thème et dessin (Ui), fenêtres de configuration (Dialogs)
-  tools/                     anciens prototypes (WhpV1Demo, LinuxBootProbe)
 ```
 
 Le [README du VMM](src/vmm/README.md) décrit le modèle d'exécution, les interruptions et chaque périphérique.

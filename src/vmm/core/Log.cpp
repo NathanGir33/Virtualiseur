@@ -20,6 +20,9 @@ void Log::Open(const std::filesystem::path& path)
         file_ = nullptr;
     }
     file_ = _wfsopen(path.c_str(), L"wb", _SH_DENYNO); // Readable while the VM runs.
+    // UTF-8 BOM: Windows PowerShell 5.1 and older editors otherwise read the
+    // French messages as ANSI ("AccÃ¨s" instead of "Accès").
+    if (file_ != nullptr) std::fputs("\xEF\xBB\xBF", file_);
 }
 
 void Log::SetVerbose(bool verbose) noexcept { verbose_ = verbose; }

@@ -1059,8 +1059,8 @@ private:
                     info = L"Aucune carte Ethernet ou Wi-Fi trouvée sur l'hôte.";
                     infoColor = color::kOrange;
                 } else if (wireless) {
-                    info = L"Wi-Fi : beaucoup de pilotes (dont Intel) refusent l'injection de trames par Npcap, et le "
-                           L"pont échoue alors (voir vmm.log). Si ça marche, la machine emprunte la MAC de l'hôte "
+                    info = L"Wi-Fi : selon le pilote et le réseau, l'injection de trames par Npcap peut être refusée, "
+                           L"et le pont échoue alors (voir vmm.log). Si ça marche, la machine emprunte la MAC de l'hôte "
                            L"(IPv4 seulement). Préfère une carte Ethernet, ou le NAT.";
                     infoColor = color::kOrange;
                 } else {

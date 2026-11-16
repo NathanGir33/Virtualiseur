@@ -63,7 +63,7 @@ Le gestionnaire affiche l'état de chaque VM (en marche, en pause, éteinte) et 
 | Mode | Ce que voit la machine | Remarques |
 |---|---|---|
 | NAT | Internet via l'hôte, adresse 10.0.2.15 | Redirections de ports : 127.0.0.1:2222 → 22 permet `ssh -p 2222 utilisateur@localhost` |
-| Accès par pont | Le réseau local, adresse donnée par la box | Demande [Npcap](https://npcap.com). Fiable en Ethernet. En Wi-Fi, beaucoup de pilotes refusent l'injection de trames (c'est le cas de l'Intel AX201) : `vmm.log` l'indique, utilise alors le NAT |
+| Accès par pont | Le réseau local, adresse donnée par la box | Demande [Npcap](https://npcap.com). Fiable en Ethernet. En Wi-Fi, l'injection de trames dépend du pilote et du réseau (l'Intel AX201 la refuse sur certains réseaux, l'accepte sur d'autres) : en cas de refus, `vmm.log` l'indique, utilise alors le NAT |
 | Réseau interne | Les autres machines du même nom de réseau | Pas de DHCP : adresses fixes, par exemple 192.168.100.1/24, .2… |
 | Réseau privé hôte | Rien (isolée) | L'hôte la joint seulement par les redirections de ports |
 | Câble débranché | Une carte sans lien | |

@@ -76,13 +76,13 @@ std::wstring DerivedMac(const std::wstring& seed)
     return text;
 }
 
+// Same rule as the VMM (main.cpp): a pipe name may hold any character but a
+// backslash, so the full VM name is kept and two VMs never share a pipe.
 std::wstring PipeName(const std::wstring& vmName)
 {
     std::wstring name = L"\\\\.\\pipe\\Virtualiseur-";
     for (const wchar_t character : vmName) {
-        const bool safe = (character >= L'a' && character <= L'z') || (character >= L'A' && character <= L'Z') ||
-                          (character >= L'0' && character <= L'9') || character == L'-' || character == L'_';
-        name.push_back(safe ? character : L'_');
+        name.push_back(character == L'\\' || character < 0x20 ? L'_' : character);
     }
     return name;
 }

@@ -334,17 +334,6 @@ void FileInputThread(std::stop_token stop, VmSlot& slot, std::filesystem::path p
     }
 }
 
-std::wstring PipeName(const std::string& vmName)
-{
-    std::wstring name = L"\\\\.\\pipe\\Virtualiseur-";
-    for (const char character : vmName) {
-        const bool safe = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-                          (character >= '0' && character <= '9') || character == '-' || character == '_';
-        name.push_back(safe ? static_cast<wchar_t>(character) : L'_');
-    }
-    return name;
-}
-
 // Control channel used by the manager: one text command per connection.
 void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
 {
@@ -432,6 +421,17 @@ std::string Narrow(const std::wstring& text)
     std::string result(static_cast<std::size_t>(length), '\0');
     WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length, nullptr, nullptr);
     return result;
+}
+
+// Same rule as the manager (VmLibrary.cpp): a pipe name may hold any character
+// but a backslash, so the full VM name is kept and two VMs never share a pipe.
+std::wstring PipeName(const std::string& vmName)
+{
+    std::wstring name = L"\\\\.\\pipe\\Virtualiseur-";
+    for (const wchar_t character : Widen(vmName)) {
+        name.push_back(character == L'\\' || character < 0x20 ? L'_' : character);
+    }
+    return name;
 }
 
 std::atomic<VmSlot*> g_consoleSlot = nullptr;
