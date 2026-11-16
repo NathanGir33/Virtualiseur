@@ -14,6 +14,7 @@ Bibliothèque statique (`VirtualiseurWHPBackend.lib`) qui enveloppe l'API Window
   - `TranslateGuestVirtualAddress()`.
 - `VirtualDisk` : disque brut *sparse*. Les E/S positionnelles (`OVERLAPPED`) permettent des accès concurrents depuis plusieurs threads.
 - `Iso9660Image` : lecteur ISO 9660 (fichiers, blocs logiques de 2048 octets, libellé du volume), utilisé pour le CD-ROM virtuel et l'extraction du noyau.
-- `LinuxBootProtocol`, `PciConfigMechanism1` : versions historiques utilisées par les prototypes de `src/tools`. Le VMM a ses propres implémentations dans `src/vmm/boot` et `src/vmm/devices`.
+
+Le protocole de démarrage Linux et le bus PCI sont dans le VMM (`src/vmm/boot`, `src/vmm/devices`).
 
 Le programme consommateur doit lier `WinHvPlatform.lib`, et `WinHvEmulation.lib` s'il utilise l'émulateur d'instructions.

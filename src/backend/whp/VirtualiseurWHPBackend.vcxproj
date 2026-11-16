@@ -46,17 +46,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="WindowsHypervisorBackend.cpp" />
-    <ClCompile Include="LinuxBootProtocol.cpp" />
     <ClCompile Include="VirtualDisk.cpp" />
     <ClCompile Include="Iso9660Image.cpp" />
-    <ClCompile Include="PciConfigMechanism1.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="WindowsHypervisorBackend.h" />
-    <ClInclude Include="LinuxBootProtocol.h" />
     <ClInclude Include="VirtualDisk.h" />
     <ClInclude Include="Iso9660Image.h" />
-    <ClInclude Include="PciConfigMechanism1.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
