@@ -1,0 +1,24 @@
+﻿Virtualiseur est installé.
+
+PREMIER DÉMARRAGE
+
+- Si l'installation a activé la « Plateforme de l'hyperviseur Windows », redémarrez Windows avant de lancer une machine virtuelle.
+- Sur un PC à processeur AMD, la virtualisation doit aussi être activée dans le BIOS/UEFI (option « SVM Mode » ou « AMD-V »). Sur Intel : « Intel Virtualization Technology (VT-x) ».
+- Lancez Virtualiseur depuis le menu Démarrer, cliquez sur « Nouvelle », choisissez une image ISO Linux (par exemple Debian 13), réglez la mémoire, les processeurs et le disque, puis « Créer ».
+
+OÙ SONT LES MACHINES ?
+
+Dans Documents\Virtualiseur\VMs : un dossier par machine (configuration, disque virtuel, journaux). La désinstallation propose de les supprimer ou de les garder.
+
+OPTIONNEL
+
+- Accès par pont (la VM sur votre réseau local) : installez Npcap, gratuit, depuis https://npcap.com. Les autres modes réseau (NAT, réseau interne, réseau privé hôte) n'en ont pas besoin.
+- Accélération 3D : incluse. En cas de problème d'affichage, décochez « Accélération 3D » dans la configuration de la machine (page Affichage).
+
+RACCOURCIS DANS LA FENÊTRE D'UNE MACHINE
+
+- Ctrl droit + F : plein écran.
+- Ctrl droit seul : rend le clavier et la souris à Windows ; un clic dans la fenêtre les reprend.
+- Menu Périphériques : couper le son, capture du clavier.
+
+Le guide complet est dans le menu Démarrer : « Guide d'utilisation ».

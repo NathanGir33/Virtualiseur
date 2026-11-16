@@ -1,0 +1,17 @@
+vcpkg_installed/
+dist/
+**/out/
+**/obj/
+*.user
+.vs/
+
+# Machines virtuelles (disques de plusieurs Gio et journaux)
+VMs/
+# Position de la fenêtre et dernière VM sélectionnée du gestionnaire
+manager.ini
+*.img
+*.qcow2
+*.iso
+
+# Installateur compilé
+installer/Output/

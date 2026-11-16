@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7B1E2C4A-5D3F-4E8B-9A61-2F0C8D9E4B17}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>VirtualiseurVM</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>true</UseDebugLibraries><PlatformToolset>v145</PlatformToolset><CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries><PlatformToolset>v145</PlatformToolset><CharacterSet>Unicode</CharacterSet><WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)out\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>VirtualiseurVM</TargetName>
+  </PropertyGroup>
+  <PropertyGroup>
+    <!-- /p:EnableSlirp=false builds without the libslirp NAT backend (no vcpkg needed). -->
+    <EnableSlirp Condition="'$(EnableSlirp)' == ''">true</EnableSlirp>
+  </PropertyGroup>
+  <PropertyGroup Label="Vcpkg" Condition="'$(EnableSlirp)' == 'true'">
+    <VcpkgRoot Condition="'$(VcpkgRoot)' == '' and '$(VCPKG_ROOT)' != ''">$(VCPKG_ROOT)\</VcpkgRoot>
+    <VcpkgRoot Condition="'$(VcpkgRoot)' == '' and Exists('$(VSInstallDir)VC\vcpkg\vcpkg.exe')">$(VSInstallDir)VC\vcpkg\</VcpkgRoot>
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgTriplet>x64-windows</VcpkgTriplet>
+    <VcpkgApplocalDeps>true</VcpkgApplocalDeps>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(EnableSlirp)' != 'true'">
+    <VcpkgEnabled>false</VcpkgEnabled>
+    <VcpkgEnableManifest>false</VcpkgEnableManifest>
+  </PropertyGroup>
+  <Import Project="$(VcpkgRoot)scripts\buildsystems\msbuild\vcpkg.props"
+          Condition="'$(EnableSlirp)' == 'true' and Exists('$(VcpkgRoot)scripts\buildsystems\msbuild\vcpkg.props')" />
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/utf-8 /permissive- %(AdditionalOptions)</AdditionalOptions>
+      <DisableSpecificWarnings>4324;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions>NOMINMAX;WIN32_LEAN_AND_MEAN;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)..\backend\whp;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Condition="'$(Configuration)'=='Release'">
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>WinHvPlatform.lib;WinHvEmulation.lib;Ws2_32.lib;User32.lib;Gdi32.lib;d2d1.lib;opengl32.lib;windowscodecs.lib;ole32.lib;shell32.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(EnableSlirp)' == 'true'">
+    <Link>
+      <AdditionalDependencies>slirp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(EnableSlirp)' != 'true'">
+    <ClCompile>
+      <PreprocessorDefinitions>VIRTUALISEUR_NO_SLIRP;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="Vm.cpp" />
+    <ClCompile Include="core\Log.cpp" />
+    <ClCompile Include="core\GuestMemory.cpp" />
+    <ClCompile Include="devices\AcpiPm.cpp" />
+    <ClCompile Include="devices\IdeController.cpp" />
+    <ClCompile Include="devices\IoApic.cpp" />
+    <ClCompile Include="devices\LegacyDevices.cpp" />
+    <ClCompile Include="devices\Pci.cpp" />
+    <ClCompile Include="devices\Ps2Controller.cpp" />
+    <ClCompile Include="devices\Virtio.cpp" />
+    <ClCompile Include="devices\VirtioBlk.cpp" />
+    <ClCompile Include="devices\VirtioNet.cpp" />
+    <ClCompile Include="devices\VirtioModern.cpp" />
+    <ClCompile Include="devices\VirtioGpu.cpp" />
+    <ClCompile Include="devices\Virgl.cpp" />
+    <ClCompile Include="devices\VirtioSerial.cpp" />
+    <ClCompile Include="devices\VirtioSound.cpp" />
+    <ClCompile Include="audio\WasapiOutput.cpp" />
+    <ClCompile Include="agent\GuestAgent.cpp" />
+    <ClCompile Include="ui\ClipboardBridge.cpp" />
+    <ClCompile Include="devices\VirtioInput.cpp" />
+    <ClCompile Include="firmware\AcpiTables.cpp" />
+    <ClCompile Include="boot\LinuxLoader.cpp" />
+    <ClCompile Include="boot\BootSources.cpp" />
+    <ClCompile Include="net\SlirpNetworkBackend.cpp" />
+    <ClCompile Include="net\NetworkBackend.cpp" />
+    <ClCompile Include="net\InternalNetworkBackend.cpp" />
+    <ClCompile Include="net\BridgeNetworkBackend.cpp" />
+    <ClCompile Include="ui\DisplayWindow.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Vm.h" />
+    <ClInclude Include="core\Bus.h" />
+    <ClInclude Include="core\Log.h" />
+    <ClInclude Include="core\GuestMemory.h" />
+    <ClInclude Include="devices\AcpiPm.h" />
+    <ClInclude Include="devices\IdeController.h" />
+    <ClInclude Include="devices\IoApic.h" />
+    <ClInclude Include="devices\LegacyDevices.h" />
+    <ClInclude Include="devices\Pci.h" />
+    <ClInclude Include="devices\Ps2Controller.h" />
+    <ClInclude Include="devices\Virtio.h" />
+    <ClInclude Include="devices\VirtioBlk.h" />
+    <ClInclude Include="devices\VirtioNet.h" />
+    <ClInclude Include="devices\VirtioModern.h" />
+    <ClInclude Include="devices\VirtioGpu.h" />
+    <ClInclude Include="devices\Virgl.h" />
+    <ClInclude Include="devices\VirtioSerial.h" />
+    <ClInclude Include="devices\VirtioSound.h" />
+    <ClInclude Include="audio\WasapiOutput.h" />
+    <ClInclude Include="agent\GuestAgent.h" />
+    <ClInclude Include="ui\ClipboardBridge.h" />
+    <ClInclude Include="devices\VirtioInput.h" />
+    <ClInclude Include="firmware\AcpiTables.h" />
+    <ClInclude Include="boot\LinuxLoader.h" />
+    <ClInclude Include="boot\BootSources.h" />
+    <ClInclude Include="net\SlirpNetworkBackend.h" />
+    <ClInclude Include="net\NetworkBackend.h" />
+    <ClInclude Include="net\InternalNetworkBackend.h" />
+    <ClInclude Include="net\BridgeNetworkBackend.h" />
+    <ClInclude Include="ui\DisplayWindow.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="VirtualiseurVM.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\backend\whp\VirtualiseurWHPBackend.vcxproj">
+      <Project>{E1655360-7B4C-4D62-A47C-018C1DBCF68A}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(VcpkgRoot)scripts\buildsystems\msbuild\vcpkg.targets"
+          Condition="'$(EnableSlirp)' == 'true' and Exists('$(VcpkgRoot)scripts\buildsystems\msbuild\vcpkg.targets')" />
+</Project>

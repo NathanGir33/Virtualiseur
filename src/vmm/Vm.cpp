@@ -1,0 +1,810 @@
+#include "Vm.h"
+
+#include "boot/BootSources.h"
+#include "core/Log.h"
+#include "devices/AcpiPm.h"
+#include "devices/IdeController.h"
+#include "devices/IoApic.h"
+#include "devices/LegacyDevices.h"
+#include "devices/Pci.h"
+#include "devices/Ps2Controller.h"
+#include "devices/VirtioBlk.h"
+#include "devices/VirtioNet.h"
+#include "devices/VirtioSound.h"
+#include "firmware/AcpiTables.h"
+#include "net/BridgeNetworkBackend.h"
+#include "net/InternalNetworkBackend.h"
+#include "net/SlirpNetworkBackend.h"
+
+#include <WinHvEmulation.h>
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+
+namespace vmm {
+namespace {
+
+std::vector<std::uint8_t> ReadHostFile(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) throw std::runtime_error("Impossible d'ouvrir " + path.string());
+    const auto size = static_cast<std::size_t>(input.tellg());
+    std::vector<std::uint8_t> data(size);
+    input.seekg(0);
+    input.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size));
+    if (!input) throw std::runtime_error("Lecture incomplète de " + path.string());
+    return data;
+}
+
+bool HasArgument(const std::string& commandLine, const std::string& name)
+{
+    std::istringstream words(commandLine);
+    std::string word;
+    while (words >> word) {
+        if (word == name || word.rfind(name + "=", 0) == 0) return true;
+    }
+    return false;
+}
+
+void AppendArgument(std::string& commandLine, const std::string& argument)
+{
+    if (!commandLine.empty()) commandLine.push_back(' ');
+    commandLine += argument;
+}
+
+constexpr std::uint16_t kVirtioNetIoBase = 0xC100;
+constexpr std::uint16_t kVirtioBlkIoBase = 0xC200;
+constexpr std::uint16_t kVirtioGpuIoBase = 0xC300;
+constexpr std::uint16_t kVirtioTabletIoBase = 0xC400;
+constexpr std::uint32_t kVirtioNetGsi = 11;
+constexpr std::uint32_t kVirtioBlkGsi = 10;
+constexpr std::uint32_t kVirtioGpuGsi = 16;
+constexpr std::uint32_t kVirtioTabletGsi = 17;
+constexpr std::uint16_t kVirtioSerialIoBase = 0xC500;
+constexpr std::uint32_t kVirtioSerialGsi = 18;
+constexpr std::uint16_t kVirtioSoundIoBase = 0xC600;
+constexpr std::uint32_t kVirtioSoundGsi = 19;
+
+std::wstring WidenUtf8(const std::string& text)
+{
+    if (text.empty()) return {};
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring result(static_cast<std::size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length);
+    return result;
+}
+
+// PCI host bridge and ISA bridge identities (i440FX / PIIX3).
+class SimplePciFunction final : public PciFunction {
+public:
+    using PciFunction::PciFunction;
+};
+
+} // namespace
+
+Vm::Vm(const VmConfig& config, SerialOutput serialOutput)
+    : config_(config), serialOutput_(std::move(serialOutput))
+{
+    if (config_.cpus == 0 || config_.cpus > 64) throw std::invalid_argument("Nombre de vCPU invalide (1-64).");
+
+    const auto capabilities = virtualiseur::whp::QueryHostCapabilities();
+    if (FAILED(capabilities.status) || !capabilities.hypervisorPresent) {
+        throw std::runtime_error("Windows Hypervisor Platform n'est pas disponible. Active la fonctionnalité "
+                                 "« Plateforme de l'hyperviseur Windows » puis redémarre Windows.");
+    }
+
+    partition_ = std::make_unique<virtualiseur::whp::Partition>(config_.cpus, true);
+
+    std::uint64_t framebufferBytes = 0;
+    if (config_.display == DisplayMode::Graphics) {
+        config_.width = std::clamp<std::uint32_t>(config_.width, 640, 3840) & ~7u;
+        config_.height = std::clamp<std::uint32_t>(config_.height, 480, 2160);
+        FramebufferInfo info;
+        info.base = layout::kFramebufferBase;
+        info.width = config_.width;
+        info.height = config_.height;
+        info.stride = config_.width * 4;
+        framebufferBytes = static_cast<std::uint64_t>(info.stride) * info.height;
+        framebuffer_ = info;
+    }
+    memory_ = std::make_unique<GuestMemory>(*partition_, config_.memoryMiB * 1024 * 1024, framebufferBytes);
+
+    if (!config_.disk.empty()) {
+        if (std::filesystem::exists(config_.disk)) {
+            disk_.emplace(virtualiseur::whp::VirtualDisk::Open(config_.disk));
+        } else {
+            if (config_.diskSizeMiB == 0) throw std::runtime_error("Le disque n'existe pas et aucune taille n'est indiquée.");
+            disk_.emplace(virtualiseur::whp::VirtualDisk::CreateSparse(config_.disk, config_.diskSizeMiB * 1024 * 1024));
+            VMM_INFO("Disque sparse créé: %s (%llu MiB).", config_.disk.string().c_str(),
+                     static_cast<unsigned long long>(config_.diskSizeMiB));
+        }
+    }
+    if (!config_.iso.empty()) iso_ = std::make_unique<virtualiseur::whp::Iso9660Image>(config_.iso);
+
+    BuildDevices();
+    LoadBootImage();
+}
+
+Vm::~Vm()
+{
+    RequestStop(exitReason_.load());
+    {
+        const std::lock_guard lock(pauseMutex_);
+        paused_ = false;
+    }
+    pauseCondition_.notify_all();
+    for (auto& thread : vcpus_) {
+        if (thread.joinable()) thread.join();
+    }
+    // Stop device threads before the partition and guest memory go away.
+    agent_.reset();
+    network_.reset();
+    pciFunctions_.clear();
+    pit_.reset();
+}
+
+void Vm::BuildDevices()
+{
+    InterruptSink* sink = nullptr;
+    ioApic_ = std::make_unique<IoApic>(*partition_, (std::min<std::uint32_t>)(config_.cpus, 15));
+    sink = ioApic_.get();
+    mmioBus_.Register(layout::kIoApicBase, 0x1000, ioApic_.get());
+
+    pic_ = std::make_unique<Pic8259Pair>();
+    for (const std::uint16_t port : std::array<std::uint16_t, 6>{0x20, 0x21, 0xA0, 0xA1, 0x4D0, 0x4D1}) {
+        ioBus_.Register(port, 1, pic_.get());
+    }
+
+    pit_ = std::make_unique<Pit8254>(deviceLock_, *sink);
+    ioBus_.Register(0x40, 4, pit_.get());
+    ioBus_.Register(0x61, 1, pit_.get());
+
+    rtc_ = std::make_unique<CmosRtc>(config_.memoryMiB * 1024 * 1024, config_.rtcLocalTime);
+    ioBus_.Register(0x70, 2, rtc_.get());
+
+    uart_ = std::make_unique<Uart16550>(*sink, 4, [this](std::uint8_t value) {
+        if (serialOutput_) serialOutput_(value);
+    });
+    ioBus_.Register(0x3F8, 8, uart_.get());
+
+    ps2_ = std::make_unique<Ps2Controller>(*sink, [this] { Reset(); });
+    ioBus_.Register(0x60, 1, ps2_.get());
+    ioBus_.Register(0x64, 1, ps2_.get());
+
+    acpi_ = std::make_unique<AcpiPm>(*sink, [this] {
+        VMM_INFO("Le système invité s'est éteint (ACPI S5).");
+        RequestStop(VmExit::PowerOff);
+    });
+    ioBus_.Register(AcpiPm::kBase, 12, acpi_.get());
+
+    vga_ = std::make_unique<VgaRegisters>();
+    ioBus_.Register(0x3B0, 0x30, vga_.get());
+
+    post_ = std::make_unique<PostPort>();
+    ioBus_.Register(0x80, 1, post_.get());
+    ioBus_.Register(0xE9, 1, post_.get());
+
+    pciBus_ = std::make_unique<PciBus>([this] { Reset(); });
+    ioBus_.Register(0xCF8, 8, pciBus_.get());
+
+    auto host = std::make_unique<SimplePciFunction>(std::uint16_t{0x8086}, std::uint16_t{0x1237}, std::uint8_t{0x06},
+                                                    std::uint8_t{0x00}, std::uint8_t{0x00}, std::uint8_t{0x02});
+    pciBus_->Add(0, 0, host.get());
+    pciFunctions_.push_back(std::move(host));
+
+    auto isa = std::make_unique<SimplePciFunction>(std::uint16_t{0x8086}, std::uint16_t{0x7000}, std::uint8_t{0x06},
+                                                   std::uint8_t{0x01}, std::uint8_t{0x00}, std::uint8_t{0x00});
+    isa->SetMultiFunction();
+    pciBus_->Add(1, 0, isa.get());
+    pciFunctions_.push_back(std::move(isa));
+
+    auto ide = std::make_unique<IdeController>(*memory_, *sink, ioBus_);
+    ide_ = ide.get();
+    pciBus_->Add(1, 1, ide.get());
+    pciFunctions_.push_back(std::move(ide));
+    if (disk_ && config_.diskBus == DiskBus::Ide) ide_->AttachDisk(0, &*disk_);
+    if (iso_) ide_->AttachCdrom(1, iso_.get());
+
+    if (config_.network != NetworkMode::None) {
+        auto net = std::make_unique<VirtioNet>(*memory_, *sink, ioBus_, kVirtioNetIoBase, kVirtioNetGsi,
+            [this](std::span<const std::uint8_t> frame) { return network_ && network_->Send(frame); }, config_.mac);
+        virtioNet_ = net.get();
+        pciBus_->Add(3, 0, net.get());
+        pciFunctions_.push_back(std::move(net));
+        auto receive = [this](std::span<const std::uint8_t> frame) {
+            const DeviceGuard guard(deviceLock_);
+            if (virtioNet_ != nullptr) virtioNet_->Receive(frame);
+        };
+        // A backend that cannot start leaves the card in place, cable unplugged.
+        try {
+            switch (config_.network) {
+            case NetworkMode::Nat:
+            case NetworkMode::HostOnly:
+#ifdef VIRTUALISEUR_NO_SLIRP
+                VMM_WARN("Réseau NAT indisponible : ce binaire a été compilé sans libslirp.");
+#else
+                network_ = std::make_unique<SlirpNetworkBackend>(receive, config_.network == NetworkMode::HostOnly,
+                                                                 config_.portForwards);
+#endif
+                break;
+            case NetworkMode::Bridged:
+                network_ = std::make_unique<BridgeNetworkBackend>(receive, config_.bridgeAdapter, config_.mac);
+                break;
+            case NetworkMode::Internal:
+                network_ = std::make_unique<InternalNetworkBackend>(receive, config_.internalNetwork, config_.mac);
+                break;
+            default:
+                VMM_INFO("Carte réseau %s : câble débranché.", FormatMac(config_.mac).c_str());
+                break;
+            }
+        } catch (const std::exception& error) {
+            VMM_WARN("Réseau indisponible (%s) : la carte réseau reste débranchée.", error.what());
+            network_.reset();
+        }
+        virtioNet_->SetLinkUp(network_ != nullptr);
+    }
+    if (disk_ && config_.diskBus == DiskBus::Virtio) {
+        auto blk = std::make_unique<VirtioBlk>(*memory_, *sink, deviceLock_, ioBus_, kVirtioBlkIoBase,
+                                               kVirtioBlkGsi, *disk_);
+        virtioBlk_ = blk.get();
+        pciBus_->Add(4, 0, blk.get());
+        pciFunctions_.push_back(std::move(blk));
+    }
+
+    if (config_.display == DisplayMode::Graphics && config_.virtioGpu && framebuffer_) {
+        auto gpu = std::make_unique<VirtioGpu>(*memory_, *sink, deviceLock_, ioBus_, kVirtioGpuIoBase, kVirtioGpuGsi,
+                                               framebuffer_->width, framebuffer_->height,
+                                               framebuffer_->base, memory_->FramebufferBytes(), config_.gpu3d);
+        virtioGpu_ = gpu.get();
+        pciBus_->Add(5, 0, gpu.get());
+        pciFunctions_.push_back(std::move(gpu));
+    }
+    if (config_.display == DisplayMode::Graphics && config_.tablet) {
+        auto tablet = std::make_unique<VirtioTablet>(*memory_, *sink, ioBus_, kVirtioTabletIoBase, kVirtioTabletGsi);
+        tablet_ = tablet.get();
+        pciBus_->Add(6, 0, tablet.get());
+        pciFunctions_.push_back(std::move(tablet));
+    }
+
+    if (config_.display != DisplayMode::None) {
+        // spice-vdagent port: clipboard sharing and file transfer.
+        agent_ = std::make_unique<GuestAgent>(deviceLock_);
+        auto* agent = agent_.get();
+        auto serial = std::make_unique<VirtioSerial>(
+            *memory_, *sink, ioBus_, kVirtioSerialIoBase, kVirtioSerialGsi, GuestAgent::kPortName,
+            [agent](std::span<const std::uint8_t> data) { agent->OnBytes(data); },
+            [agent](bool open) { agent->OnOpen(open); });
+        agent->Attach(serial.get());
+        pciBus_->Add(7, 0, serial.get());
+        pciFunctions_.push_back(std::move(serial));
+    }
+
+    if (config_.audio) {
+        try {
+            auto sound = std::make_unique<VirtioSound>(*memory_, *sink, deviceLock_, ioBus_, kVirtioSoundIoBase,
+                                                       kVirtioSoundGsi, L"Virtualiseur — " + WidenUtf8(config_.name));
+            sound_ = sound.get();
+            pciBus_->Add(8, 0, sound.get());
+            pciFunctions_.push_back(std::move(sound));
+        } catch (const std::exception& error) {
+            VMM_WARN("Carte son désactivée : %s", error.what());
+        }
+    }
+
+    AcpiConfig acpi;
+    acpi.cpuCount = config_.cpus;
+    acpi.pciMmioStart = static_cast<std::uint32_t>(memory_->LowRamEnd());
+    acpi.pciRoutes = {{3, static_cast<std::uint8_t>(kVirtioNetGsi)}, {4, static_cast<std::uint8_t>(kVirtioBlkGsi)},
+                      {5, static_cast<std::uint8_t>(kVirtioGpuGsi)}, {6, static_cast<std::uint8_t>(kVirtioTabletGsi)},
+                      {7, static_cast<std::uint8_t>(kVirtioSerialGsi)}, {8, static_cast<std::uint8_t>(kVirtioSoundGsi)}};
+    const auto rsdp = BuildAcpiTables(*memory_, acpi);
+    (void)rsdp;
+}
+
+void Vm::LoadBootImage()
+{
+    std::optional<BootSelection> selection;
+    const bool kernelGiven = !config_.kernel.empty();
+    auto boot = config_.boot;
+    if (boot == BootDevice::Auto) boot = kernelGiven ? BootDevice::Kernel : BootDevice::Auto;
+
+    if (boot == BootDevice::Kernel) {
+        BootSelection direct;
+        direct.image.kernel = ReadHostFile(config_.kernel);
+        if (!config_.initrd.empty()) direct.image.initrd = ReadHostFile(config_.initrd);
+        direct.description = "noyau " + config_.kernel.filename().string();
+        selection = std::move(direct);
+    }
+    if (!selection && (boot == BootDevice::Disk || boot == BootDevice::Auto) && disk_) {
+        selection = FindDiskBoot(*disk_);
+        if (!selection && boot == BootDevice::Disk) {
+            throw std::runtime_error("Aucun système Linux amorçable (ext2/3/4 avec /boot) n'a été trouvé sur le disque.");
+        }
+    }
+    bool fromIso = false;
+    if (!selection && (boot == BootDevice::Cdrom || boot == BootDevice::Auto) && iso_) {
+        fromIso = true;
+        selection = FindIsoBoot(*iso_, config_.graphicalInstaller);
+        if (!selection) {
+            throw std::runtime_error("L'ISO ne contient pas de noyau/initrd Linux reconnu (Debian, Ubuntu, Fedora, Arch...).");
+        }
+        std::vector<std::uint8_t> preseed;
+        if (!config_.preseed.empty()) {
+            preseed = ReadHostFile(config_.preseed);
+            AppendArgument(selection->image.commandLine, "auto=true priority=critical");
+            VMM_INFO("Installation automatique: %s injecté comme /preseed.cfg.", config_.preseed.string().c_str());
+        }
+        const bool debianInstaller = selection->description.rfind("installateur Debian", 0) == 0;
+        if (config_.guestTools && debianInstaller && agent_) {
+            // Guest tools: once the installation is done, install the agent
+            // (clipboard, file drops) if a desktop was chosen. The installer
+            // loads /preseed.cfg from its initrd on its own; without
+            // "auto=true" it asks the usual questions. Without network, apt
+            // fails quietly and the installation goes on.
+            const std::string existing(preseed.begin(), preseed.end());
+            if (existing.find("preseed/late_command") != std::string::npos) {
+                VMM_WARN("Le preseed définit déjà preseed/late_command : spice-vdagent n'y est pas ajouté.");
+            } else {
+                const std::string line =
+                    "\n# Virtualiseur : agent invité (presse-papiers partagé, dépôt de fichiers).\n"
+                    "d-i preseed/late_command string if [ -d /target/usr/share/xsessions ] || "
+                    "[ -d /target/usr/share/wayland-sessions ]; then in-target apt-get install -y "
+                    "spice-vdagent || true; fi\n";
+                preseed.insert(preseed.end(), line.begin(), line.end());
+                VMM_INFO("Outils invité : spice-vdagent sera installé avec le bureau.");
+            }
+        }
+        if (!preseed.empty()) AppendFileToInitrd(selection->image.initrd, "/preseed.cfg", preseed);
+    }
+    if (!selection) {
+        throw std::runtime_error("Rien à démarrer: indique une ISO, un disque contenant Linux ou un noyau.");
+    }
+
+    std::string commandLine = config_.replaceCommandLine ? config_.commandLine : selection->image.commandLine;
+    if (!config_.replaceCommandLine && !config_.commandLine.empty()) AppendArgument(commandLine, config_.commandLine);
+    if (!HasArgument(commandLine, "console")) {
+        // The last console= becomes /dev/console: keep the screen primary.
+        AppendArgument(commandLine, "console=ttyS0,115200n8");
+        if (config_.display != DisplayMode::None) AppendArgument(commandLine, "console=tty0");
+    }
+    if (!HasArgument(commandLine, "tsc")) AppendArgument(commandLine, "tsc=reliable");
+    if (fromIso && config_.display == DisplayMode::None && !HasArgument(commandLine, "DEBIAN_FRONTEND")) {
+        AppendArgument(commandLine, "DEBIAN_FRONTEND=text");
+    }
+    selection->image.commandLine = commandLine;
+    bootDescription_ = selection->description;
+    VMM_INFO("Démarrage: %s", bootDescription_.c_str());
+    VMM_INFO("Ligne de commande: %s", commandLine.c_str());
+
+    const auto info = LoadLinux(*memory_, selection->image, 0xE0000, framebuffer_);
+    SetupLinuxBootCpu(*partition_, 0, info);
+    for (std::uint32_t index = 1; index < config_.cpus; ++index) ParkApplicationProcessor(*partition_, index);
+    // Let WHP's local APIC accept interrupts before the guest programs it.
+    partition_->SetLocalApicRegister(0, 0x0F0, 0x000001FF);
+}
+
+void Vm::Start()
+{
+    state_ = VmState::Running;
+    for (std::uint32_t index = 0; index < config_.cpus; ++index) {
+        vcpus_.emplace_back([this, index] { VcpuThread(index); });
+    }
+}
+
+VmExit Vm::Wait()
+{
+    for (auto& thread : vcpus_) {
+        if (thread.joinable()) thread.join();
+    }
+    state_ = VmState::Stopped;
+    return exitReason_.load();
+}
+
+void Vm::CancelAll()
+{
+    for (std::uint32_t index = 0; index < config_.cpus; ++index) (void)partition_->CancelRunVirtualProcessor(index);
+}
+
+void Vm::RequestStop(VmExit reason)
+{
+    if (!stopRequested_.exchange(true)) exitReason_ = reason;
+    {
+        const std::lock_guard lock(pauseMutex_);
+        paused_ = false;
+    }
+    pauseCondition_.notify_all();
+    if (partition_) CancelAll();
+}
+
+void Vm::Pause()
+{
+    if (state_ != VmState::Running) return;
+    {
+        const std::lock_guard lock(pauseMutex_);
+        paused_ = true;
+    }
+    state_ = VmState::Paused;
+    CancelAll();
+    VMM_INFO("VM en pause.");
+}
+
+void Vm::Resume()
+{
+    if (state_ != VmState::Paused) return;
+    {
+        const std::lock_guard lock(pauseMutex_);
+        paused_ = false;
+    }
+    state_ = VmState::Running;
+    pauseCondition_.notify_all();
+    VMM_INFO("VM reprise.");
+}
+
+void Vm::PowerOff()
+{
+    VMM_INFO("Arrêt forcé de la VM demandé.");
+    RequestStop(VmExit::PowerOff);
+}
+
+void Vm::Reset()
+{
+    VMM_INFO("Redémarrage de la VM demandé.");
+    RequestStop(VmExit::Reset);
+}
+
+bool Vm::AcpiShutdown()
+{
+    if (state_ == VmState::Paused) Resume();
+    const DeviceGuard guard(deviceLock_);
+    return acpi_->PressPowerButton();
+}
+
+bool Vm::CdromEjected() const
+{
+    const DeviceGuard guard(deviceLock_);
+    return ide_ == nullptr || ide_->CdromEjected();
+}
+
+DisplaySnapshot Vm::Display() const
+{
+    DisplaySnapshot snapshot;
+    snapshot.mode = config_.display;
+    if (config_.display == DisplayMode::Graphics && framebuffer_) {
+        snapshot.framebuffer = memory_->Framebuffer();
+        snapshot.width = framebuffer_->width;
+        snapshot.height = framebuffer_->height;
+        snapshot.stride = framebuffer_->stride;
+    } else if (config_.display == DisplayMode::Text) {
+        const DeviceGuard guard(deviceLock_);
+        const auto start = vga_->StartOffset();
+        snapshot.text = reinterpret_cast<const volatile std::uint16_t*>(
+            memory_->Pointer(layout::kVgaTextBase, 0x8000)) + (start < 0x3000 ? start : 0);
+        snapshot.width = 80;
+        snapshot.height = 25;
+        snapshot.cursor = static_cast<std::uint16_t>(vga_->CursorOffset() - start);
+        snapshot.cursorVisible = vga_->CursorVisible();
+    }
+    return snapshot;
+}
+
+void Vm::KeyboardScanCode(std::uint8_t code)
+{
+    const DeviceGuard guard(deviceLock_);
+    ps2_->KeyboardScanCode(code);
+}
+
+int Vm::KeyboardLeds() const
+{
+    const DeviceGuard guard(deviceLock_);
+    return ps2_->KeyboardLeds();
+}
+
+void Vm::MouseMotion(int dx, int dy, int wheel, std::uint8_t buttons)
+{
+    const DeviceGuard guard(deviceLock_);
+    ps2_->MouseMotion(dx, dy, wheel, buttons);
+}
+
+bool Vm::CopyGpuScanout(ScanoutCopy& copy, std::uint32_t& top, std::uint32_t& bottom)
+{
+    return virtioGpu_ != nullptr && virtioGpu_->CopyScanout(copy, top, bottom);
+}
+
+bool Vm::GpuCursorSnapshot(GpuCursor& cursor)
+{
+    return virtioGpu_ != nullptr && virtioGpu_->CursorSnapshot(cursor);
+}
+
+void Vm::RequestDisplaySize(std::uint32_t width, std::uint32_t height)
+{
+    if (virtioGpu_ == nullptr) return;
+    const DeviceGuard guard(deviceLock_);
+    virtioGpu_->RequestDisplaySize(width, height);
+}
+
+bool Vm::TabletReady() const
+{
+    if (tablet_ == nullptr) return false;
+    const DeviceGuard guard(deviceLock_);
+    return tablet_->Ready();
+}
+
+void Vm::TabletMove(std::int32_t x, std::int32_t y)
+{
+    if (tablet_ == nullptr) return;
+    const DeviceGuard guard(deviceLock_);
+    tablet_->Move(x, y);
+}
+
+void Vm::TabletButton(VirtioTablet::Button button, bool pressed)
+{
+    if (tablet_ == nullptr) return;
+    const DeviceGuard guard(deviceLock_);
+    tablet_->SetButton(button, pressed);
+}
+
+void Vm::TabletWheel(std::int32_t steps, bool horizontal)
+{
+    if (tablet_ == nullptr) return;
+    const DeviceGuard guard(deviceLock_);
+    tablet_->Wheel(steps, horizontal);
+}
+
+void Vm::SetAudioMuted(bool muted)
+{
+    if (sound_ != nullptr) sound_->SetMuted(muted);
+}
+
+bool Vm::SerialInput(std::uint8_t value)
+{
+    const DeviceGuard guard(deviceLock_);
+    if (uart_->ReceiveFifoFull()) return false;
+    uart_->ReceiveByte(value);
+    return true;
+}
+
+std::string Vm::Statistics() const
+{
+    std::ostringstream text;
+    text << "sorties=" << exits_.load() << " io=" << ioExits_.load() << " mmio=" << mmioExits_.load()
+         << " irq_ioapic=" << ioApic_->DeliveredCount() << " ticks_pit=" << pit_->TimerInterrupts();
+    if (virtioBlk_ != nullptr) text << " virtio_blk=" << virtioBlk_->CompletedRequests();
+    if (virtioGpu_ != nullptr) {
+        text << " gpu_flush=" << virtioGpu_->Flushes();
+        if (virtioGpu_->Accelerated()) text << " gpu_submit_3d=" << virtioGpu_->Submits();
+    }
+    if (sound_ != nullptr) text << " audio_octets=" << sound_->PlayedBytes();
+    return text.str();
+}
+
+// --- Port and memory dispatch ----------------------------------------------------------
+
+std::uint32_t Vm::PortRead(std::uint16_t port, std::uint8_t size)
+{
+    const DeviceGuard guard(deviceLock_);
+    if (auto* device = ioBus_.Find(port)) return device->IoRead(port, size);
+    if (unhandledPorts_.fetch_add(1) < 32) VMM_DEBUG("Lecture du port non émulé 0x%04x (%u octets).", port, size);
+    return 0xFFFFFFFFu;
+}
+
+void Vm::PortWrite(std::uint16_t port, std::uint8_t size, std::uint32_t value)
+{
+    const DeviceGuard guard(deviceLock_);
+    if (auto* device = ioBus_.Find(port)) {
+        device->IoWrite(port, size, value);
+        return;
+    }
+    if (unhandledPorts_.fetch_add(1) < 32) {
+        VMM_DEBUG("Écriture sur le port non émulé 0x%04x = 0x%x (%u octets).", port, value, size);
+    }
+}
+
+void Vm::MemoryAccess(std::uint64_t gpa, std::uint8_t* data, std::uint8_t size, bool write)
+{
+    if (auto* device = mmioBus_.Find(gpa)) {
+        const DeviceGuard guard(deviceLock_);
+        if (write) {
+            std::uint64_t value = 0;
+            std::memcpy(&value, data, (std::min<std::size_t>)(size, 8));
+            device->MmioWrite(gpa, size, value);
+        } else {
+            const auto value = device->MmioRead(gpa, size);
+            std::memcpy(data, &value, (std::min<std::size_t>)(size, 8));
+        }
+        return;
+    }
+    if (auto* host = memory_->Pointer(gpa, size)) {
+        if (write) std::memcpy(host, data, size);
+        else std::memcpy(data, host, size);
+        return;
+    }
+    // Unbacked physical address: reads float high, writes are discarded.
+    if (!write) std::memset(data, 0xFF, size);
+}
+
+HRESULT CALLBACK Vm::EmulatorIo(void* context, WHV_EMULATOR_IO_ACCESS_INFO* access)
+{
+    auto& vcpu = *static_cast<VcpuContext*>(context);
+    const auto size = static_cast<std::uint8_t>(access->AccessSize);
+    if (access->Direction == 0) {
+        access->Data = vcpu.vm->PortRead(access->Port, size);
+    } else {
+        vcpu.vm->PortWrite(access->Port, size, access->Data);
+    }
+    return S_OK;
+}
+
+HRESULT CALLBACK Vm::EmulatorMemory(void* context, WHV_EMULATOR_MEMORY_ACCESS_INFO* access)
+{
+    auto& vcpu = *static_cast<VcpuContext*>(context);
+    vcpu.vm->MemoryAccess(access->GpaAddress, access->Data, access->AccessSize, access->Direction != 0);
+    return S_OK;
+}
+
+HRESULT CALLBACK Vm::EmulatorGetRegisters(void* context, const WHV_REGISTER_NAME* names,
+                                          UINT32 count, WHV_REGISTER_VALUE* values)
+{
+    auto& vcpu = *static_cast<VcpuContext*>(context);
+    return WHvGetVirtualProcessorRegisters(vcpu.vm->partition_->Handle(), vcpu.index, names, count, values);
+}
+
+HRESULT CALLBACK Vm::EmulatorSetRegisters(void* context, const WHV_REGISTER_NAME* names,
+                                          UINT32 count, const WHV_REGISTER_VALUE* values)
+{
+    auto& vcpu = *static_cast<VcpuContext*>(context);
+    return WHvSetVirtualProcessorRegisters(vcpu.vm->partition_->Handle(), vcpu.index, names, count, values);
+}
+
+HRESULT CALLBACK Vm::EmulatorTranslate(void* context, WHV_GUEST_VIRTUAL_ADDRESS gva,
+                                       WHV_TRANSLATE_GVA_FLAGS flags,
+                                       WHV_TRANSLATE_GVA_RESULT_CODE* result,
+                                       WHV_GUEST_PHYSICAL_ADDRESS* gpa)
+{
+    auto& vcpu = *static_cast<VcpuContext*>(context);
+    WHV_TRANSLATE_GVA_RESULT translation{};
+    const auto status = WHvTranslateGva(vcpu.vm->partition_->Handle(), vcpu.index, gva, flags, &translation, gpa);
+    *result = translation.ResultCode;
+    return status;
+}
+
+// --- vCPU loop -----------------------------------------------------------------------------------
+
+void Vm::VcpuThread(std::uint32_t index)
+{
+    SetThreadDescription(GetCurrentThread(), (L"vCPU " + std::to_wstring(index)).c_str());
+    VcpuContext context{this, index, nullptr};
+    WHV_EMULATOR_CALLBACKS callbacks{};
+    callbacks.Size = sizeof(callbacks);
+    callbacks.WHvEmulatorIoPortCallback = &Vm::EmulatorIo;
+    callbacks.WHvEmulatorMemoryCallback = &Vm::EmulatorMemory;
+    callbacks.WHvEmulatorGetVirtualProcessorRegisters = &Vm::EmulatorGetRegisters;
+    callbacks.WHvEmulatorSetVirtualProcessorRegisters = &Vm::EmulatorSetRegisters;
+    callbacks.WHvEmulatorTranslateGvaPage = &Vm::EmulatorTranslate;
+    if (FAILED(WHvEmulatorCreateEmulator(&callbacks, &context.emulator))) {
+        VMM_ERROR("vCPU %u: création de l'émulateur d'instructions impossible.", index);
+        RequestStop(VmExit::Error);
+        return;
+    }
+
+    try {
+        while (!stopRequested_.load()) {
+            {
+                std::unique_lock lock(pauseMutex_);
+                pauseCondition_.wait(lock, [this] { return !paused_ || stopRequested_.load(); });
+            }
+            if (stopRequested_.load()) break;
+
+            const auto exit = partition_->RunVirtualProcessor(index);
+            ++exits_;
+            switch (exit.ExitReason) {
+            case WHvRunVpExitReasonCanceled:
+                break;
+            case WHvRunVpExitReasonX64IoPortAccess:
+                ++ioExits_;
+                HandleIoExit(context, exit);
+                break;
+            case WHvRunVpExitReasonMemoryAccess:
+                ++mmioExits_;
+                HandleMmioExit(context, exit);
+                break;
+            case WHvRunVpExitReasonX64ApicEoi: {
+                const DeviceGuard guard(deviceLock_);
+                ioApic_->EndOfInterrupt(exit.ApicEoi.InterruptVector);
+                break;
+            }
+            case WHvRunVpExitReasonX64Halt:
+                HandleHaltExit(index);
+                break;
+            case WHvRunVpExitReasonUnrecoverableException:
+                VMM_WARN("vCPU %u: triple faute à RIP=0x%llx, redémarrage de la VM.", index,
+                         static_cast<unsigned long long>(exit.VpContext.Rip));
+                RequestStop(VmExit::Reset);
+                break;
+            default:
+                VMM_ERROR("vCPU %u: sortie WHP non gérée 0x%x à RIP=0x%llx.", index,
+                          static_cast<unsigned>(exit.ExitReason), static_cast<unsigned long long>(exit.VpContext.Rip));
+                RequestStop(VmExit::Error);
+                break;
+            }
+        }
+    } catch (const std::exception& error) {
+        VMM_ERROR("vCPU %u: %s", index, error.what());
+        RequestStop(VmExit::Error);
+    }
+    WHvEmulatorDestroyEmulator(context.emulator);
+}
+
+void Vm::HandleIoExit(VcpuContext& context, const WHV_RUN_VP_EXIT_CONTEXT& exit)
+{
+    const auto& io = exit.IoPortAccess;
+    if (io.AccessInfo.StringOp || io.AccessInfo.RepPrefix) {
+        WHV_EMULATOR_STATUS status{};
+        const auto result = WHvEmulatorTryIoEmulation(context.emulator, &context, &exit.VpContext, &io, &status);
+        if (FAILED(result) || !status.EmulationSuccessful) {
+            VMM_ERROR("Émulation d'E/S chaîne impossible sur le port 0x%x (statut 0x%x).",
+                      io.PortNumber, status.AsUINT32);
+            RequestStop(VmExit::Error);
+        }
+        return;
+    }
+
+    const auto size = static_cast<std::uint8_t>(io.AccessInfo.AccessSize);
+    std::array<WHV_REGISTER_NAME, 2> names{WHvX64RegisterRip, WHvX64RegisterRax};
+    std::array<WHV_REGISTER_VALUE, 2> values{};
+    values[0].Reg64 = exit.VpContext.Rip + exit.VpContext.InstructionLength;
+    UINT32 count = 1;
+    if (io.AccessInfo.IsWrite) {
+        PortWrite(io.PortNumber, size, static_cast<std::uint32_t>(io.Rax));
+    } else {
+        const auto data = PortRead(io.PortNumber, size);
+        if (size == 4) {
+            values[1].Reg64 = data; // 32-bit results zero-extend into RAX.
+        } else {
+            const std::uint64_t mask = size == 1 ? 0xFF : 0xFFFF;
+            values[1].Reg64 = (io.Rax & ~mask) | (data & mask);
+        }
+        count = 2;
+    }
+    const auto result = WHvSetVirtualProcessorRegisters(partition_->Handle(), context.index, names.data(), count, values.data());
+    if (FAILED(result)) throw std::runtime_error("WHvSetVirtualProcessorRegisters a échoué après une E/S.");
+}
+
+void Vm::HandleMmioExit(VcpuContext& context, const WHV_RUN_VP_EXIT_CONTEXT& exit)
+{
+    WHV_EMULATOR_STATUS status{};
+    const auto result = WHvEmulatorTryMmioEmulation(context.emulator, &context, &exit.VpContext,
+                                                    &exit.MemoryAccess, &status);
+    if (FAILED(result) || !status.EmulationSuccessful) {
+        VMM_ERROR("Émulation MMIO impossible: GPA=0x%llx GVA=0x%llx RIP=0x%llx (statut 0x%x).",
+                  static_cast<unsigned long long>(exit.MemoryAccess.Gpa),
+                  static_cast<unsigned long long>(exit.MemoryAccess.Gva),
+                  static_cast<unsigned long long>(exit.VpContext.Rip), status.AsUINT32);
+        RequestStop(VmExit::Error);
+    }
+}
+
+void Vm::HandleHaltExit(std::uint32_t index)
+{
+    // With WHP's local APIC, HLT normally waits inside the hypervisor. A HLT
+    // exit with interrupts disabled means the guest stopped for good.
+    const WHV_REGISTER_NAME name = WHvX64RegisterRflags;
+    WHV_REGISTER_VALUE value{};
+    if (FAILED(WHvGetVirtualProcessorRegisters(partition_->Handle(), index, &name, 1, &value))) return;
+    if ((value.Reg64 & 0x200) != 0) return;
+    if (index == 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (haltSince_ == std::chrono::steady_clock::time_point{}) haltSince_ = now;
+        if (now - haltSince_ > std::chrono::seconds(2)) {
+            VMM_INFO("Le système invité est arrêté (HLT avec interruptions masquées).");
+            RequestStop(VmExit::PowerOff);
+            return;
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+}
+
+} // namespace vmm

@@ -1,0 +1,82 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <vector>
+
+#include <Windows.h>
+#include <WinHvPlatform.h>
+
+namespace virtualiseur::whp {
+
+struct HostCapabilities {
+    bool apiAvailable = false;
+    bool hypervisorPresent = false;
+    HRESULT status = E_FAIL;
+};
+
+// Queries whether Windows exposes the Windows Hypervisor Platform API and
+// whether a hypervisor is currently available to it.
+HostCapabilities QueryHostCapabilities() noexcept;
+
+// Owns a WHP partition, its virtual processors, and mapped guest RAM. Firmware,
+// devices, guest boot state, exit handling, and the UI are separate work.
+class Partition final {
+public:
+    explicit Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic = false);
+    ~Partition();
+
+    Partition(const Partition&) = delete;
+    Partition& operator=(const Partition&) = delete;
+    Partition(Partition&&) = delete;
+    Partition& operator=(Partition&&) = delete;
+
+    std::uint32_t VirtualProcessorCount() const noexcept;
+    void* AllocateAndMapGuestMemory(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes,
+                                    bool trackDirtyPages = false);
+    // Fills one bit per 4 KiB page written since the previous query (and
+    // clears them). Returns false if dirty tracking is unavailable.
+    bool QueryDirtyPages(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes,
+                         std::vector<std::uint64_t>& bitmap) noexcept;
+    void SetVirtualProcessorRegisters(
+        std::uint32_t virtualProcessorIndex,
+        std::span<const WHV_REGISTER_NAME> names,
+        std::span<const WHV_REGISTER_VALUE> values);
+    std::vector<WHV_REGISTER_VALUE> GetVirtualProcessorRegisters(
+        std::uint32_t virtualProcessorIndex,
+        std::span<const WHV_REGISTER_NAME> names);
+    WHV_RUN_VP_EXIT_CONTEXT RunVirtualProcessor(std::uint32_t virtualProcessorIndex);
+    void RequestExternalInterrupt(std::uint32_t virtualProcessorIndex, std::uint32_t vector);
+    // Thread-safe: WHP queues the interrupt in its emulated local APIC and
+    // wakes the target virtual processor if it is waiting.
+    void RequestInterrupt(const WHV_INTERRUPT_CONTROL& control);
+    WHV_PARTITION_HANDLE Handle() const noexcept { return handle_; }
+    void AcknowledgeExternalInterrupt(std::uint32_t virtualProcessorIndex);
+    void SetLocalApicRegister(
+        std::uint32_t virtualProcessorIndex, std::uint32_t registerOffset, std::uint32_t value);
+    std::uint32_t GetLocalApicRegister(
+        std::uint32_t virtualProcessorIndex, std::uint32_t registerOffset) const;
+    bool CancelRunVirtualProcessor(std::uint32_t virtualProcessorIndex) noexcept;
+    void* GetHostAddressForGuestPhysicalAddress(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes) const noexcept;
+    WHV_TRANSLATE_GVA_RESULT TranslateGuestVirtualAddress(
+        std::uint32_t virtualProcessorIndex,
+        std::uint64_t guestVirtualAddress,
+        WHV_TRANSLATE_GVA_FLAGS flags,
+        std::uint64_t& guestPhysicalAddress);
+
+private:
+    struct MemoryMapping {
+        std::uint64_t guestPhysicalAddress;
+        std::size_t sizeInBytes;
+        void* hostAddress;
+    };
+
+    void Close() noexcept;
+
+    WHV_PARTITION_HANDLE handle_ = nullptr;
+    std::vector<std::uint32_t> createdProcessors_;
+    std::vector<MemoryMapping> memoryMappings_;
+};
+
+} // namespace virtualiseur::whp
