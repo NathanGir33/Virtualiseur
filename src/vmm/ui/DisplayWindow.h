@@ -5,6 +5,7 @@
 
 #include <Windows.h>
 #include <d2d1_1.h>
+#include <dxgi1_2.h>
 #include <wrl/client.h>
 
 #include <memory>
@@ -92,6 +93,10 @@ private:
     void SetKeyboardSuspended(bool suspended);
     bool EnsureD2D();
     void ReleaseD2D();
+    bool CreateTargetBitmap();
+    void ResizeSwapChain(UINT width, UINT height);
+    // Tells the VM whether the screen is drawn from the shared GPU texture.
+    void SyncTextureDisplay(Vm& vm);
     void PaintGraphics(HDC dc, const RECT& client, const DisplaySnapshot& snapshot);
     void PaintText(HDC dc, const RECT& client, const DisplaySnapshot& snapshot);
     RECT FitRect(const RECT& client, std::uint32_t width, std::uint32_t height) const;
@@ -149,11 +154,19 @@ private:
     ULONGLONG lastFrameTick_ = 0;
     bool closing_ = false;
 
-    // Direct2D graphics renderer.
-    Microsoft::WRL::ComPtr<ID2D1Factory> d2dFactory_;
-    Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> d2dTarget_;
-    Microsoft::WRL::ComPtr<ID2D1DeviceContext> d2dContext_; // High-quality downscaling, if available.
-    Microsoft::WRL::ComPtr<ID2D1Bitmap> d2dBitmap_;
+    // Direct2D graphics renderer: a device context on the process-wide
+    // Direct3D 11 device (SharedD3DDevice) drawing into a flip-model swap
+    // chain, so it can show the virgl screen texture without a copy.
+    Microsoft::WRL::ComPtr<ID2D1Factory1> d2dFactory_;
+    Microsoft::WRL::ComPtr<ID2D1Device> d2dDevice_;
+    Microsoft::WRL::ComPtr<ID2D1DeviceContext> d2dTarget_;
+    Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain_;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap1> targetBitmap_; // Swap chain back buffer.
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> d2dBitmap_;      // Upload of CPU framebuffers.
+    Microsoft::WRL::ComPtr<ID2D1Bitmap1> sharedBitmap_;  // The shared virgl texture.
+    std::uint64_t sharedGeneration_ = ~0ull;
+    const Vm* textureDisplayVm_ = nullptr; // VM last told about texture display...
+    bool textureDisplay_ = false;          // ...and what it was told.
     std::uint32_t bitmapWidth_ = 0;
     std::uint32_t bitmapHeight_ = 0;
     bool uploadAll_ = true;       // The bitmap no longer mirrors the framebuffer.

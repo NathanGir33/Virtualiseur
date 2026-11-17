@@ -301,6 +301,7 @@ void Vm::BuildDevices()
                                                framebuffer_->width, framebuffer_->height,
                                                framebuffer_->base, memory_->FramebufferBytes(), config_.gpu3d);
         virtioGpu_ = gpu.get();
+        virtioGpu_->SetShareAllowed(config_.gpuShare);
         pciBus_->Add(kVirtioGpuSlot, 0, gpu.get());
         pciFunctions_.push_back(std::move(gpu));
     }
@@ -561,6 +562,16 @@ void Vm::MouseMotion(int dx, int dy, int wheel, std::uint8_t buttons)
 bool Vm::CopyGpuScanout(ScanoutCopy& copy, DirtyRows& rows)
 {
     return virtioGpu_ != nullptr && virtioGpu_->CopyScanout(copy, rows);
+}
+
+void Vm::SetGpuTextureDisplay(bool enabled)
+{
+    if (virtioGpu_ != nullptr) virtioGpu_->SetTextureDisplay(enabled);
+}
+
+void Vm::SetGpuShareAllowed(bool allowed)
+{
+    if (virtioGpu_ != nullptr) virtioGpu_->SetShareAllowed(allowed);
 }
 
 bool Vm::GpuCursorSnapshot(GpuCursor& cursor)

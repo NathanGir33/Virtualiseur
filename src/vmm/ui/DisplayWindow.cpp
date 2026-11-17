@@ -236,6 +236,7 @@ void DisplayWindow::OnFrame(bool fromTimerMessage)
         if (fromTimerMessage) InvalidateRect(window_, nullptr, FALSE);
         return;
     }
+    SyncTextureDisplay(*vm);
     if (vm->Display().mode != DisplayMode::Graphics) {
         // Text mode diffs its cell buffer itself; the fallback rate is enough.
         if (fromTimerMessage) InvalidateRect(window_, nullptr, FALSE);
@@ -300,7 +301,8 @@ bool DisplayWindow::GraphicsSnapshot(Vm& vm, DisplaySnapshot& snapshot, DirtyRow
             ScheduleGuestResize(100);
         }
         snapshot.mode = DisplayMode::Graphics;
-        snapshot.framebuffer = gpuCopy_.pixels.data();
+        snapshot.texture = gpuCopy_.texture;
+        snapshot.framebuffer = gpuCopy_.texture ? nullptr : gpuCopy_.pixels.data();
         snapshot.width = gpuCopy_.width;
         snapshot.height = gpuCopy_.height;
         snapshot.stride = gpuCopy_.width * 4;
@@ -497,49 +499,116 @@ bool DisplayWindow::EnsureD2D()
 {
     if (d2dTarget_) return true;
     if (d2dUnavailable_) return false;
-    if (!d2dFactory_ &&
-        FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2dFactory_.GetAddressOf()))) {
+    const SharedD3DGuard d3d(SharedD3DLock());
+    const auto fail = [this] {
+        ReleaseD2D();
         d2dUnavailable_ = true;
         return false;
+    };
+    ID3D11Device* device = SharedD3DDevice();
+    if (device == nullptr) return fail();
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    Microsoft::WRL::ComPtr<IDXGIFactory2> dxgiFactory;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || FAILED(dxgiDevice->GetAdapter(&adapter)) ||
+        FAILED(adapter->GetParent(IID_PPV_ARGS(&dxgiFactory)))) {
+        return fail();
     }
-    RECT client{};
-    GetClientRect(window_, &client);
+    if (!d2dFactory_) {
+        D2D1_FACTORY_OPTIONS options{};
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), &options,
+                                     reinterpret_cast<void**>(d2dFactory_.GetAddressOf())))) {
+            return fail();
+        }
+    }
+    if (FAILED(d2dFactory_->CreateDevice(dxgiDevice.Get(), d2dDevice_.GetAddressOf())) ||
+        FAILED(d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, d2dTarget_.GetAddressOf()))) {
+        return fail();
+    }
     // 96 DPI: Direct2D coordinates are physical pixels (the process is
     // per-monitor DPI aware).
-    const auto properties = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
-    // Pacing is ours; DWM composition never tears a windowed swap chain.
-    const auto hwndProperties = D2D1::HwndRenderTargetProperties(
-        window_,
-        D2D1::SizeU(static_cast<UINT32>((std::max)(client.right - client.left, 1L)),
-                    static_cast<UINT32>((std::max)(client.bottom - client.top, 1L))),
-        D2D1_PRESENT_OPTIONS_IMMEDIATELY);
-    if (FAILED(d2dFactory_->CreateHwndRenderTarget(properties, hwndProperties, d2dTarget_.GetAddressOf()))) {
-        d2dTarget_.Reset();
-        d2dUnavailable_ = true;
-        return false;
+    d2dTarget_->SetDpi(96.0f, 96.0f);
+
+    RECT client{};
+    GetClientRect(window_, &client);
+    DXGI_SWAP_CHAIN_DESC1 description{};
+    description.Width = static_cast<UINT>((std::max)(client.right - client.left, 1L));
+    description.Height = static_cast<UINT>((std::max)(client.bottom - client.top, 1L));
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    description.BufferCount = 2;
+    description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    description.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    if (FAILED(dxgiFactory->CreateSwapChainForHwnd(device, window_, &description, nullptr, nullptr,
+                                                   swapChain_.GetAddressOf()))) {
+        return fail();
     }
-    (void)d2dTarget_.As(&d2dContext_); // Optional (Windows 8+).
+    (void)dxgiFactory->MakeWindowAssociation(window_, DXGI_MWA_NO_ALT_ENTER); // Full screen is ours.
+    if (!CreateTargetBitmap()) return fail();
     d2dBitmap_.Reset();
+    sharedBitmap_.Reset();
+    sharedGeneration_ = ~0ull;
     uploadAll_ = true;
     return true;
 }
 
+bool DisplayWindow::CreateTargetBitmap()
+{
+    Microsoft::WRL::ComPtr<IDXGISurface> backBuffer;
+    if (FAILED(swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer)))) return false;
+    const auto properties = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+    if (FAILED(d2dTarget_->CreateBitmapFromDxgiSurface(backBuffer.Get(), &properties, targetBitmap_.GetAddressOf()))) {
+        return false;
+    }
+    d2dTarget_->SetTarget(targetBitmap_.Get());
+    return true;
+}
+
+void DisplayWindow::ResizeSwapChain(UINT width, UINT height)
+{
+    if (!swapChain_ || width == 0 || height == 0) return;
+    const SharedD3DGuard d3d(SharedD3DLock());
+    d2dTarget_->SetTarget(nullptr);
+    targetBitmap_.Reset(); // The buffers cannot be resized while referenced.
+    if (FAILED(swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0)) || !CreateTargetBitmap()) {
+        ReleaseD2D();
+    }
+}
+
 void DisplayWindow::ReleaseD2D()
 {
+    const SharedD3DGuard d3d(SharedD3DLock());
     cursorBitmap_.Reset();
     cursorBitmapSerial_ = ~0ull;
     d2dBitmap_.Reset();
-    d2dContext_.Reset();
+    sharedBitmap_.Reset();
+    sharedGeneration_ = ~0ull;
+    if (d2dTarget_) d2dTarget_->SetTarget(nullptr);
+    targetBitmap_.Reset();
+    swapChain_.Reset();
     d2dTarget_.Reset();
+    d2dDevice_.Reset();
     bitmapWidth_ = 0;
     bitmapHeight_ = 0;
     uploadAll_ = true;
 }
 
+void DisplayWindow::SyncTextureDisplay(Vm& vm)
+{
+    // The shared texture is only usable while Direct2D draws the window.
+    const bool wanted = !d2dUnavailable_;
+    if (textureDisplayVm_ == &vm && textureDisplay_ == wanted) return;
+    textureDisplayVm_ = &vm;
+    textureDisplay_ = wanted;
+    vm.SetGpuTextureDisplay(wanted);
+}
+
 bool DisplayWindow::RenderGraphics(const DisplaySnapshot& snapshot, const DirtyRows& rows)
 {
+    const SharedD3DGuard d3d(SharedD3DLock());
     if (!EnsureD2D()) return false;
     RECT client{};
     GetClientRect(window_, &client);
@@ -548,32 +617,58 @@ bool DisplayWindow::RenderGraphics(const DisplaySnapshot& snapshot, const DirtyR
         return true;
     }
 
-    if (!d2dBitmap_ || bitmapWidth_ != snapshot.width || bitmapHeight_ != snapshot.height) {
-        d2dBitmap_.Reset();
-        const auto properties = D2D1::BitmapProperties(
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
-        if (FAILED(d2dTarget_->CreateBitmap(D2D1::SizeU(snapshot.width, snapshot.height), properties,
-                                            d2dBitmap_.GetAddressOf()))) {
-            ReleaseD2D();
-            d2dUnavailable_ = true;
-            InvalidateRect(window_, nullptr, FALSE);
-            return false;
+    ID2D1Bitmap* image = nullptr;
+    if (snapshot.texture) {
+        // virgl screen: drawn straight from the texture the GPU thread fills.
+        const auto& shared = *snapshot.texture;
+        if (!shared.texture) return true;
+        if (!sharedBitmap_ || sharedGeneration_ != shared.generation) {
+            sharedBitmap_.Reset();
+            Microsoft::WRL::ComPtr<IDXGISurface> surface;
+            const auto properties = D2D1::BitmapProperties1(
+                D2D1_BITMAP_OPTIONS_NONE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+                96.0f, 96.0f);
+            if (FAILED(shared.texture.As(&surface)) ||
+                FAILED(d2dTarget_->CreateBitmapFromDxgiSurface(surface.Get(), &properties,
+                                                               sharedBitmap_.GetAddressOf()))) {
+                ReleaseD2D();
+                d2dUnavailable_ = true; // The VM goes back to readbacks (SyncTextureDisplay).
+                InvalidateRect(window_, nullptr, FALSE);
+                return false;
+            }
+            sharedGeneration_ = shared.generation;
         }
-        bitmapWidth_ = snapshot.width;
-        bitmapHeight_ = snapshot.height;
-        uploadAll_ = true;
-    }
-
-    // XRGB8888 guest pixels are BGRA bytes: uploaded as is, only the changed rows.
-    if (uploadAll_) {
-        if (FAILED(d2dBitmap_->CopyFromMemory(nullptr, snapshot.framebuffer, snapshot.stride))) return true;
-        uploadAll_ = false;
+        image = sharedBitmap_.Get();
     } else {
-        for (const auto& band : rows.Bands()) {
-            const auto area = D2D1::RectU(0, band.top, snapshot.width, band.bottom);
-            (void)d2dBitmap_->CopyFromMemory(&area,
-                snapshot.framebuffer + static_cast<std::size_t>(band.top) * snapshot.stride, snapshot.stride);
+        if (snapshot.framebuffer == nullptr) return true;
+        if (!d2dBitmap_ || bitmapWidth_ != snapshot.width || bitmapHeight_ != snapshot.height) {
+            d2dBitmap_.Reset();
+            const auto properties = D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+            if (FAILED(d2dTarget_->CreateBitmap(D2D1::SizeU(snapshot.width, snapshot.height), properties,
+                                                d2dBitmap_.GetAddressOf()))) {
+                ReleaseD2D();
+                d2dUnavailable_ = true;
+                InvalidateRect(window_, nullptr, FALSE);
+                return false;
+            }
+            bitmapWidth_ = snapshot.width;
+            bitmapHeight_ = snapshot.height;
+            uploadAll_ = true;
         }
+
+        // XRGB8888 guest pixels are BGRA bytes: uploaded as is, only the changed rows.
+        if (uploadAll_) {
+            if (FAILED(d2dBitmap_->CopyFromMemory(nullptr, snapshot.framebuffer, snapshot.stride))) return true;
+            uploadAll_ = false;
+        } else {
+            for (const auto& band : rows.Bands()) {
+                const auto area = D2D1::RectU(0, band.top, snapshot.width, band.bottom);
+                (void)d2dBitmap_->CopyFromMemory(&area,
+                    snapshot.framebuffer + static_cast<std::size_t>(band.top) * snapshot.stride, snapshot.stride);
+            }
+        }
+        image = d2dBitmap_.Get();
     }
 
     const auto target = FitRect(client, snapshot.width, snapshot.height);
@@ -583,19 +678,16 @@ bool DisplayWindow::RenderGraphics(const DisplaySnapshot& snapshot, const DirtyR
                                   static_cast<float>(target.right), static_cast<float>(target.bottom)};
     const bool exact = drawWidth == static_cast<LONG>(snapshot.width) && drawHeight == static_cast<LONG>(snapshot.height);
     const bool downscale = drawWidth < static_cast<LONG>(snapshot.width);
+    // The shared texture may be larger than the guest screen (kept across
+    // small resolution changes): draw only the screen's part of it.
+    const D2D1_RECT_F source{0.0f, 0.0f, static_cast<float>(snapshot.width), static_cast<float>(snapshot.height)};
 
     d2dTarget_->BeginDraw();
     d2dTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f));
-    if (d2dContext_) {
-        const auto mode = exact ? D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR
-                        : downscale ? D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC
-                                    : D2D1_INTERPOLATION_MODE_LINEAR;
-        d2dContext_->DrawBitmap(d2dBitmap_.Get(), &destination, 1.0f, mode, nullptr, nullptr);
-    } else {
-        d2dTarget_->DrawBitmap(d2dBitmap_.Get(), destination, 1.0f,
-                               exact ? D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR
-                                     : D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-    }
+    const auto mode = exact ? D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+                    : downscale ? D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC
+                                : D2D1_INTERPOLATION_MODE_LINEAR;
+    d2dTarget_->DrawBitmap(image, &destination, 1.0f, mode, &source, nullptr);
     if (DrawsGuestCursor() && cursor_.pixels.size() >= static_cast<std::size_t>(cursor_.width) * cursor_.height * 4) {
         // Captured PS/2 mouse: draw the guest cursor plane over the screen.
         if (!cursorBitmap_ || cursorBitmapSerial_ != cursor_.shapeSerial) {
@@ -617,12 +709,15 @@ bool DisplayWindow::RenderGraphics(const DisplaySnapshot& snapshot, const DirtyR
             d2dTarget_->PopAxisAlignedClip();
         }
     }
-    const HRESULT result = d2dTarget_->EndDraw();
-    if (result == D2DERR_RECREATE_TARGET) {
-        // GPU reset or driver update: rebuild on the next paint.
+    HRESULT result = d2dTarget_->EndDraw();
+    // Pacing is ours; DWM composition never tears a windowed flip-model swap chain.
+    if (SUCCEEDED(result)) result = swapChain_->Present(0, 0);
+    if (result == D2DERR_RECREATE_TARGET || result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET) {
+        // GPU reset or driver update: the shared device is gone, use GDI.
         ReleaseD2D();
+        d2dUnavailable_ = true;
         InvalidateRect(window_, nullptr, FALSE);
-        return true;
+        return false;
     }
     if (FAILED(result)) {
         ReleaseD2D();
@@ -687,9 +782,7 @@ LRESULT DisplayWindow::Handle(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_SIZE:
         if (mouseCaptured_) CaptureMouse(); // Refresh the clip rectangle.
-        if (d2dTarget_ && LOWORD(lParam) != 0 && HIWORD(lParam) != 0) {
-            if (FAILED(d2dTarget_->Resize(D2D1::SizeU(LOWORD(lParam), HIWORD(lParam))))) ReleaseD2D();
-        }
+        if (d2dTarget_) ResizeSwapChain(LOWORD(lParam), HIWORD(lParam));
         InvalidateRect(window_, nullptr, FALSE);
         UpdateGuestCursor(false);
         // The guest follows the window live: while dragging, once the edge
@@ -898,7 +991,9 @@ void DisplayWindow::Paint()
         snapshot = vm->Display();
         if (snapshot.mode == DisplayMode::Graphics) (void)GraphicsSnapshot(*vm, snapshot, rows, false);
     }
-    const bool graphics = snapshot.mode == DisplayMode::Graphics && snapshot.framebuffer != nullptr;
+    const bool graphics = snapshot.mode == DisplayMode::Graphics &&
+                          (snapshot.framebuffer != nullptr || snapshot.texture != nullptr);
+    if (vm) SyncTextureDisplay(*vm);
     if (graphics) {
         // Direct2D redraws the whole window each frame: nothing to clip.
         if (RenderGraphics(snapshot, rows)) {
@@ -914,8 +1009,13 @@ void DisplayWindow::Paint()
     paintRect_ = paint.rcPaint;
     RECT client{};
     GetClientRect(window_, &client);
-    if (graphics) {
+    if (graphics && snapshot.framebuffer != nullptr) {
         PaintGraphics(dc, client, snapshot);
+    } else if (graphics) {
+        // GDI fallback while the VM still sends a GPU texture: the next frames
+        // come back in system memory (SyncTextureDisplay).
+        FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        InvalidateRect(window_, nullptr, FALSE);
     } else if (snapshot.mode == DisplayMode::Text && snapshot.text != nullptr) {
         PaintText(dc, client, snapshot);
     } else {

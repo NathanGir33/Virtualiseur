@@ -2,6 +2,7 @@
 
 #include "Virgl.h"
 #include "VirtioModern.h"
+#include "../core/SharedGpu.h"
 
 #include <atomic>
 #include <cstdint>
@@ -13,11 +14,13 @@
 
 namespace vmm {
 
-// Host copy of the guest screen, filled by VirtioGpu::CopyScanout.
+// Host copy of the guest screen, filled by VirtioGpu::CopyScanout. In virgl
+// mode with Direct3D sharing, `texture` holds the screen instead of `pixels`.
 struct ScanoutCopy {
     std::vector<std::uint8_t> pixels; // BGRX, stride = width * 4.
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::shared_ptr<SharedScanout> texture;
 };
 
 // Guest cursor plane (hardware cursor) as set by the guest driver.
@@ -46,7 +49,9 @@ struct GpuCursor {
 // With `enable3d` and virglrenderer available, the device also offers
 // VIRTIO_GPU_F_VIRGL: the guest Mesa "virgl" driver then renders with the
 // host GPU through OpenGL. Every command then runs on the GPU thread, and
-// fenced commands complete when the host GPU has finished them.
+// fenced commands complete when the host GPU has finished them. Flushed
+// scanout rectangles go GPU to GPU into a shared Direct3D texture the window
+// draws as is (WGL_NV_DX_interop2), or are read back to system memory.
 class VirtioGpu final : public VirtioModernDevice {
 public:
     VirtioGpu(const GuestMemory& memory, const VirtioPlacement& placement,
@@ -67,6 +72,10 @@ public:
 
     // Device lock held: asks the guest to switch to a new resolution.
     void RequestDisplaySize(std::uint32_t width, std::uint32_t height);
+    // UI thread: the window can draw the shared Direct3D texture (virgl mode).
+    void SetTextureDisplay(bool enabled);
+    // Any thread: allows the shared texture at all (--gpu-share, control pipe).
+    void SetShareAllowed(bool allowed);
 
     std::uint64_t Flushes() const noexcept { return flushes_.load(); }
     std::uint64_t Submits() const noexcept { return submits_.load(); }
@@ -131,6 +140,12 @@ private:
     void Complete(const Command& command);
     void OnFence(std::uint32_t fence);
     void Readback(std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height);
+    // Brings this scanout rectangle (resource coordinates) to the window:
+    // GPU copy into the shared texture, or readback to system memory.
+    void UpdateScreen(std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height);
+    bool UseTexture();
+    bool EnsureSharedTexture(std::uint32_t width, std::uint32_t height);
+    void RefreshScreen(); // Whole scanout again (display path changed).
     void Reset3d();
     bool BuildBacking(const std::vector<std::uint8_t>& request, std::vector<BackingEntry>& backing,
                       std::uint64_t& total) const;
@@ -144,6 +159,11 @@ private:
     std::deque<std::shared_ptr<Command>> fenced_;
     std::uint32_t scanoutResourceId_ = 0;
     bool scanoutSwapRedBlue_ = false;
+    bool sharedFailed_ = false;                 // GPU thread: the texture path broke, readback for good.
+    std::atomic_bool textureDisplay_ = false;   // Set by the UI.
+    std::atomic_bool shareAllowed_ = true;      // --gpu-share / control pipe.
+    std::atomic_bool textureActive_ = false;    // The shared texture holds the screen.
+    std::shared_ptr<SharedScanout> shared_ = std::make_shared<SharedScanout>();
 
     std::atomic_uint32_t displayWidth_;
     std::atomic_uint32_t displayHeight_;

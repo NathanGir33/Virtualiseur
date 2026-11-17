@@ -1,6 +1,7 @@
 #include "Virgl.h"
 
 #include "../core/Log.h"
+#include "../core/SharedGpu.h"
 
 #include <gl/GL.h>
 
@@ -48,7 +49,206 @@ std::wstring ExecutableDirectory()
     return slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1);
 }
 
+// OpenGL 3.0 framebuffer objects and WGL_NV_DX_interop(2), loaded with
+// wglGetProcAddress.
+constexpr GLenum kReadFramebuffer = 0x8CA8;
+constexpr GLenum kDrawFramebuffer = 0x8CA9;
+constexpr GLenum kColorAttachment0 = 0x8CE0;
+constexpr GLenum kFramebufferComplete = 0x8CD5;
+constexpr GLenum kAccessReadWrite = 0x0001; // WGL_ACCESS_READ_WRITE_NV.
+constexpr std::uint32_t kResourceY0Top = 1;  // VIRGL_RESOURCE_Y_0_TOP.
+
+using GenFramebuffers = void(APIENTRY*)(GLsizei, GLuint*);
+using DeleteFramebuffers = void(APIENTRY*)(GLsizei, const GLuint*);
+using BindFramebuffer = void(APIENTRY*)(GLenum, GLuint);
+using FramebufferTexture2D = void(APIENTRY*)(GLenum, GLenum, GLenum, GLuint, GLint);
+using CheckFramebufferStatus = GLenum(APIENTRY*)(GLenum);
+using BlitFramebuffer = void(APIENTRY*)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+using DxOpenDevice = HANDLE(WINAPI*)(void*);
+using DxCloseDevice = BOOL(WINAPI*)(HANDLE);
+using DxRegisterObject = HANDLE(WINAPI*)(HANDLE, void*, GLuint, GLenum, GLenum);
+using DxUnregisterObject = BOOL(WINAPI*)(HANDLE, HANDLE);
+using DxLockObjects = BOOL(WINAPI*)(HANDLE, GLint, HANDLE*);
+
+// Makes a GL context current for a scope, then puts back whatever virgl had.
+class ContextScope final {
+public:
+    ContextScope(HDC dc, HGLRC context) : previousDc_(wglGetCurrentDC()), previous_(wglGetCurrentContext())
+    {
+        // Another context's rendering must be flushed before this one reads it.
+        if (previous_ != nullptr) glFlush();
+        ok_ = wglMakeCurrent(dc, context) != FALSE;
+        dc_ = dc;
+    }
+    ~ContextScope() { wglMakeCurrent(previousDc_ != nullptr ? previousDc_ : dc_, previous_); }
+    bool Ok() const noexcept { return ok_; }
+
+private:
+    HDC previousDc_;
+    HGLRC previous_;
+    HDC dc_ = nullptr;
+    bool ok_ = false;
+};
+
 } // namespace
+
+struct VirglRenderer::Interop {
+    HGLRC context = nullptr;
+    HANDLE device = nullptr;      // wglDXOpenDeviceNV(SharedD3DDevice()).
+    HANDLE object = nullptr;      // Registered shared texture.
+    GLuint texture = 0;           // Its GL name.
+    GLuint readFramebuffer = 0;
+    GLuint drawFramebuffer = 0;
+    GenFramebuffers genFramebuffers = nullptr;
+    DeleteFramebuffers deleteFramebuffers = nullptr;
+    BindFramebuffer bindFramebuffer = nullptr;
+    FramebufferTexture2D framebufferTexture2D = nullptr;
+    CheckFramebufferStatus checkFramebufferStatus = nullptr;
+    BlitFramebuffer blitFramebuffer = nullptr;
+    DxOpenDevice openDevice = nullptr;
+    DxCloseDevice closeDevice = nullptr;
+    DxRegisterObject registerObject = nullptr;
+    DxUnregisterObject unregisterObject = nullptr;
+    DxLockObjects lockObjects = nullptr;
+    DxLockObjects unlockObjects = nullptr;
+};
+
+VirglRenderer::VirglRenderer() = default;
+
+bool VirglRenderer::InitInterop()
+{
+    if (!dxInterop_ || master_ == nullptr || SharedD3DDevice() == nullptr) return false;
+    auto interop = std::make_unique<Interop>();
+    const int attributes[] = {kWglContextMajorVersion, 3, kWglContextMinorVersion, 0, 0};
+    interop->context = reinterpret_cast<CreateContextAttribs>(createContextAttribs_)(dc_, master_, attributes);
+    if (interop->context == nullptr) return false;
+    const ContextScope scope(dc_, interop->context);
+    if (!scope.Ok()) {
+        wglDeleteContext(interop->context);
+        return false;
+    }
+    const auto load = [](auto& slot, const char* name) {
+        slot = reinterpret_cast<std::remove_reference_t<decltype(slot)>>(wglGetProcAddress(name));
+        return slot != nullptr;
+    };
+    bool ok = load(interop->genFramebuffers, "glGenFramebuffers") &&
+              load(interop->deleteFramebuffers, "glDeleteFramebuffers") &&
+              load(interop->bindFramebuffer, "glBindFramebuffer") &&
+              load(interop->framebufferTexture2D, "glFramebufferTexture2D") &&
+              load(interop->checkFramebufferStatus, "glCheckFramebufferStatus") &&
+              load(interop->blitFramebuffer, "glBlitFramebuffer") &&
+              load(interop->openDevice, "wglDXOpenDeviceNV") && load(interop->closeDevice, "wglDXCloseDeviceNV") &&
+              load(interop->registerObject, "wglDXRegisterObjectNV") &&
+              load(interop->unregisterObject, "wglDXUnregisterObjectNV") &&
+              load(interop->lockObjects, "wglDXLockObjectsNV") && load(interop->unlockObjects, "wglDXUnlockObjectsNV");
+    if (ok) {
+        const SharedD3DGuard d3d(SharedD3DLock());
+        interop->device = interop->openDevice(SharedD3DDevice());
+        ok = interop->device != nullptr;
+        if (!ok) VMM_INFO("virtio-gpu : partage OpenGL/Direct3D refusé par le pilote (%lu).", GetLastError());
+    }
+    if (!ok) {
+        wglMakeCurrent(nullptr, nullptr);
+        wglDeleteContext(interop->context);
+        return false;
+    }
+    interop->genFramebuffers(1, &interop->readFramebuffer);
+    interop->genFramebuffers(1, &interop->drawFramebuffer);
+    interop_ = std::move(interop);
+    return true;
+}
+
+void VirglRenderer::ReleaseInterop()
+{
+    if (!interop_) return;
+    {
+        const ContextScope scope(dc_, interop_->context);
+        AttachSharedTexture(nullptr);
+        interop_->deleteFramebuffers(1, &interop_->readFramebuffer);
+        interop_->deleteFramebuffers(1, &interop_->drawFramebuffer);
+        const SharedD3DGuard d3d(SharedD3DLock());
+        interop_->closeDevice(interop_->device);
+    }
+    wglDeleteContext(interop_->context);
+    interop_.reset();
+}
+
+bool VirglRenderer::DxInteropAvailable()
+{
+    if (!interopTried_) {
+        interopTried_ = true;
+        const bool ok = InitInterop();
+        VMM_INFO("virtio-gpu : écran virgl %s.", ok ? "affiché depuis une texture Direct3D partagée (sans relecture)"
+                                                       : "relu en mémoire pour l'affichage");
+    }
+    return interop_ != nullptr;
+}
+
+bool VirglRenderer::AttachSharedTexture(ID3D11Texture2D* texture)
+{
+    if (!interop_) return false;
+    const ContextScope scope(dc_, interop_->context);
+    if (!scope.Ok()) return false;
+    const SharedD3DGuard d3d(SharedD3DLock());
+    if (interop_->object != nullptr) {
+        interop_->unregisterObject(interop_->device, interop_->object);
+        interop_->object = nullptr;
+    }
+    if (interop_->texture != 0) {
+        glDeleteTextures(1, &interop_->texture);
+        interop_->texture = 0;
+    }
+    if (texture == nullptr) return true;
+    glGenTextures(1, &interop_->texture);
+    interop_->object = interop_->registerObject(interop_->device, texture, interop_->texture, GL_TEXTURE_2D,
+                                                kAccessReadWrite);
+    if (interop_->object == nullptr) {
+        VMM_WARN("virtio-gpu : texture Direct3D refusée par OpenGL (%lu).", GetLastError());
+        glDeleteTextures(1, &interop_->texture);
+        interop_->texture = 0;
+        return false;
+    }
+    return true;
+}
+
+bool VirglRenderer::CopyToShared(std::uint32_t resource, std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                                 std::uint32_t height, std::uint32_t destX, std::uint32_t destY)
+{
+    if (!interop_ || interop_->object == nullptr || width == 0 || height == 0) return false;
+    VirglResourceInfo info{};
+    if (api_.resourceInfo(static_cast<int>(resource), &info) != 0 || info.texture == 0) return false;
+    const ContextScope scope(dc_, interop_->context);
+    if (!scope.Ok()) return false;
+    auto& gl = *interop_;
+    if (!gl.lockObjects(gl.device, 1, &gl.object)) return false;
+    gl.bindFramebuffer(kReadFramebuffer, gl.readFramebuffer);
+    gl.framebufferTexture2D(kReadFramebuffer, kColorAttachment0, GL_TEXTURE_2D, info.texture, 0);
+    gl.bindFramebuffer(kDrawFramebuffer, gl.drawFramebuffer);
+    gl.framebufferTexture2D(kDrawFramebuffer, kColorAttachment0, GL_TEXTURE_2D, gl.texture, 0);
+    const bool complete = gl.checkFramebufferStatus(kReadFramebuffer) == kFramebufferComplete &&
+                          gl.checkFramebufferStatus(kDrawFramebuffer) == kFramebufferComplete;
+    if (complete) {
+        // Shared texture rows are top-down (Direct3D) and GL addresses them
+        // from memory row 0 too. A virgl resource WITHOUT Y_0_TOP holds its
+        // top row first (dumb buffers, uploads); one WITH Y_0_TOP was rendered
+        // bottom-up by Mesa and is flipped on the way. Same rule as QEMU,
+        // which flips when the flag is absent because it presents into an
+        // OpenGL framebuffer (bottom-up).
+        const bool topDown = (info.flags & kResourceY0Top) == 0;
+        const auto sourceY = static_cast<GLint>(topDown ? y : info.height - y - height);
+        const auto top = static_cast<GLint>(destY);
+        const auto bottom = static_cast<GLint>(destY + height);
+        gl.blitFramebuffer(static_cast<GLint>(x), sourceY, static_cast<GLint>(x + width),
+                           sourceY + static_cast<GLint>(height), static_cast<GLint>(destX), topDown ? top : bottom,
+                           static_cast<GLint>(destX + width), topDown ? bottom : top, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    gl.framebufferTexture2D(kReadFramebuffer, kColorAttachment0, GL_TEXTURE_2D, 0, 0);
+    gl.framebufferTexture2D(kDrawFramebuffer, kColorAttachment0, GL_TEXTURE_2D, 0, 0);
+    gl.bindFramebuffer(kReadFramebuffer, 0);
+    gl.bindFramebuffer(kDrawFramebuffer, 0);
+    gl.unlockObjects(gl.device, 1, &gl.object);
+    return complete;
+}
 
 std::unique_ptr<VirglRenderer> VirglRenderer::Create(FenceCallback onFence)
 {
@@ -166,6 +366,13 @@ bool VirglRenderer::CreateWindowContext()
     const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     const auto* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     VMM_INFO("OpenGL hôte: %s (%s).", renderer != nullptr ? renderer : "?", version != nullptr ? version : "?");
+    // Sharing textures with Direct3D lets the display skip the readback.
+    using GetExtensions = const char*(WINAPI*)(HDC);
+    if (const auto getExtensions = reinterpret_cast<GetExtensions>(wglGetProcAddress("wglGetExtensionsStringARB"))) {
+        const std::string extensions = getExtensions(dc_) != nullptr ? getExtensions(dc_) : "";
+        dxInterop_ = extensions.find("WGL_NV_DX_interop2") != std::string::npos;
+        VMM_INFO("OpenGL hôte : partage avec Direct3D (WGL_NV_DX_interop2) %s.", dxInterop_ ? "disponible" : "absent");
+    }
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(legacy);
     return createContextAttribs_ != nullptr;
@@ -295,6 +502,7 @@ void VirglRenderer::Thread(std::promise<bool>* started)
         }
     }
 
+    ReleaseInterop();
     api_.cleanup(this);
     DestroyWindowContext();
 }

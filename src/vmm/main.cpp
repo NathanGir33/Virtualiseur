@@ -57,6 +57,7 @@ void PrintUsage()
         "  --fullscreen              Ouvre la fenêtre en plein écran (Ctrl droit + F pour en sortir)\n"
         "  --audio on|off            Carte son virtio-sound vers la sortie audio de Windows (défaut on)\n"
         "  --hyperv on|off           Enlightenments Hyper-V : horloge TSC de référence, timers synthétiques (défaut on)\n"
+        "  --gpu-share on|off        3D virgl : écran affiché depuis une texture Direct3D partagée, sans relecture (défaut on)\n"
         "  --preseed <fichier>       Installation Debian automatique (fichier preseed)\n"
         "  --guest-tools on|off      Installer Debian : ajoute spice-vdagent (presse-papiers, fichiers)\n"
         "                            quand un bureau est installé (défaut on)\n"
@@ -202,6 +203,11 @@ Options ParseOptions(const std::vector<std::string>& args)
             if (value == "on") options.vm.audio = true;
             else if (value == "off") options.vm.audio = false;
             else throw std::invalid_argument("--audio attend on ou off.");
+        } else if (option == "--gpu-share") {
+            const auto& value = next();
+            if (value == "on") options.vm.gpuShare = true;
+            else if (value == "off") options.vm.gpuShare = false;
+            else throw std::invalid_argument("--gpu-share attend on ou off.");
         } else if (option == "--hyperv") {
             const auto& value = next();
             if (value == "on") options.vm.hyperv = true;
@@ -387,6 +393,8 @@ void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
                     const auto state = vm->State();
                     reply = state == VmState::Paused ? "paused" : state == VmState::Running ? "running" : "stopped";
                 } else if (command == "stats") reply = vm->Statistics();
+                else if (command == "gpu-share on") vm->SetGpuShareAllowed(true);
+                else if (command == "gpu-share off") vm->SetGpuShareAllowed(false);
                 else reply = "unknown-command";
                 DWORD written = 0;
                 OVERLAPPED wio{};

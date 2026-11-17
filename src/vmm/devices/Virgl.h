@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Windows.h>
+#include <d3d11.h>
 
 #include <cstdint>
 #include <deque>
@@ -82,8 +83,20 @@ public:
     // it retires and calls the fence callback.
     void CreateFence(std::uint32_t fence, std::uint32_t context);
 
+    // --- Direct3D sharing of the screen (GPU thread only) ---
+    // True when the host driver offers WGL_NV_DX_interop2 and the bridge
+    // works with SharedD3DDevice().
+    bool DxInteropAvailable();
+    // Makes `texture` (B8G8R8A8, SharedD3DDevice) the copy target; nullptr detaches.
+    bool AttachSharedTexture(ID3D11Texture2D* texture);
+    // Copies rows [y, y + height) x [x, x + width) of the GL texture of
+    // resource `resource` (top-down coordinates) to (destX, destY) of the
+    // shared texture, GPU to GPU. Caller holds SharedD3DLock().
+    bool CopyToShared(std::uint32_t resource, std::uint32_t x, std::uint32_t y, std::uint32_t width,
+                      std::uint32_t height, std::uint32_t destX, std::uint32_t destY);
+
 private:
-    VirglRenderer() = default;
+    VirglRenderer();
     bool Load();
     void Thread(std::promise<bool>* started);
     bool CreateWindowContext();
@@ -114,6 +127,15 @@ private:
     HDC dc_ = nullptr;
     HGLRC master_ = nullptr;
     void* createContextAttribs_ = nullptr;
+    bool dxInterop_ = false; // WGL_NV_DX_interop2 offered by the host driver.
+
+    // Direct3D bridge (GPU thread). Its own GL context, sharing objects with
+    // virgl's ctx0, so virgl's cached GL state is never disturbed.
+    struct Interop;
+    bool InitInterop();
+    void ReleaseInterop();
+    std::unique_ptr<Interop> interop_;
+    bool interopTried_ = false;
 };
 
 } // namespace vmm

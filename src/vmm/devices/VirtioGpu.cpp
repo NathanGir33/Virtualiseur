@@ -784,7 +784,7 @@ std::uint32_t VirtioGpu::Execute3dControl(Command& command)
         scanoutResourceId_ = id;
         scanoutSwapRedBlue_ = info.format == kFormatR8G8B8A8 || info.format == kFormatR8G8B8X8;
         if (full) {
-            Readback(0, 0, info.width, info.height);
+            UpdateScreen(rect.x, rect.y, rect.width, rect.height);
             const std::lock_guard lock(displayMutex_);
             fullCopy_ = true;
         }
@@ -807,7 +807,7 @@ std::uint32_t VirtioGpu::Execute3dControl(Command& command)
         const auto bottom = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
             static_cast<std::uint64_t>(rect.y) + rect.height, static_cast<std::uint64_t>(screen.y) + screen.height));
         if (right <= left || bottom <= top) return kRespOkNoData;
-        Readback(left, top, right - left, bottom - top);
+        UpdateScreen(left, top, right - left, bottom - top);
         const std::lock_guard lock(displayMutex_);
         dirty_.Add(top - screen.y, bottom - screen.y);
         return kRespOkNoData;
@@ -842,6 +842,124 @@ std::uint32_t VirtioGpu::Execute3dControl(Command& command)
         VMM_DEBUG("virtio-gpu (3D): commande 0x%x non prise en charge.", type);
         return kRespErrUnspec;
     }
+}
+
+void VirtioGpu::SetTextureDisplay(bool enabled)
+{
+    if (textureDisplay_.exchange(enabled) == enabled || !virgl_) return;
+    virgl_->Post([this] { RefreshScreen(); });
+}
+
+void VirtioGpu::SetShareAllowed(bool allowed)
+{
+    if (shareAllowed_.exchange(allowed) == allowed || !virgl_) return;
+    virgl_->Post([this] { RefreshScreen(); });
+}
+
+bool VirtioGpu::UseTexture()
+{
+    return virgl_ && shareAllowed_.load() && textureDisplay_.load() && !sharedFailed_ &&
+           virgl_->DxInteropAvailable();
+}
+
+bool VirtioGpu::EnsureSharedTexture(std::uint32_t width, std::uint32_t height)
+{
+    {
+        const SharedD3DGuard d3d(SharedD3DLock());
+        if (shared_->texture && shared_->width == width && shared_->height == height) return true;
+    }
+    ID3D11Device* device = SharedD3DDevice();
+    if (device == nullptr) return false;
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = width;
+    description.Height = height;
+    description.MipLevels = 1;
+    description.ArraySize = 1;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    // Render target: OpenGL draws into it; shader resource: Direct2D reads it.
+    description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    {
+        const SharedD3DGuard d3d(SharedD3DLock());
+        if (FAILED(device->CreateTexture2D(&description, nullptr, texture.GetAddressOf()))) return false;
+    }
+    if (!virgl_->AttachSharedTexture(texture.Get())) return false;
+    const SharedD3DGuard d3d(SharedD3DLock());
+    shared_->texture = std::move(texture);
+    shared_->width = width;
+    shared_->height = height;
+    ++shared_->generation;
+    shared_->dirty.Clear();
+    textureActive_ = false; // Filled whole before it is shown.
+    return true;
+}
+
+void VirtioGpu::UpdateScreen(std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height)
+{
+    Rect screen{};
+    std::uint32_t imageWidth = 0;
+    std::uint32_t imageHeight = 0;
+    {
+        const std::lock_guard lock(displayMutex_);
+        screen = scanoutRect_;
+        if (scanout_) {
+            imageWidth = scanout_->width;
+            imageHeight = scanout_->height;
+        }
+    }
+    if (UseTexture()) {
+        bool ok = EnsureSharedTexture(screen.width, screen.height);
+        if (ok) {
+            if (!textureActive_.load()) {
+                // New texture, or coming from readbacks: copy the whole screen.
+                x = screen.x;
+                y = screen.y;
+                width = screen.width;
+                height = screen.height;
+            }
+            const SharedD3DGuard d3d(SharedD3DLock());
+            ok = virgl_->CopyToShared(scanoutResourceId_, x, y, width, height, x - screen.x, y - screen.y);
+            if (ok) shared_->dirty.Add(y - screen.y, y - screen.y + height);
+        }
+        if (ok) {
+            if (!textureActive_.exchange(true)) VMM_INFO("virtio-gpu : écran affiché depuis la texture partagée.");
+            return;
+        }
+        sharedFailed_ = true;
+        VMM_WARN("virtio-gpu : copie vers la texture Direct3D impossible, retour à la relecture.");
+    }
+    if (textureActive_.exchange(false)) {
+        // Back to system memory: the host image missed every update since.
+        VMM_INFO("virtio-gpu : écran relu en mémoire système.");
+        x = 0;
+        y = 0;
+        width = imageWidth;
+        height = imageHeight;
+        const std::lock_guard lock(displayMutex_);
+        fullCopy_ = true;
+    }
+    Readback(x, y, width, height);
+}
+
+void VirtioGpu::RefreshScreen()
+{
+    if (scanoutResourceId_ == 0) return;
+    Rect screen{};
+    {
+        const std::lock_guard lock(displayMutex_);
+        if (!scanoutActive_) return;
+        screen = scanoutRect_;
+    }
+    if (UseTexture()) {
+        textureActive_ = false; // Whole screen into the texture.
+        UpdateScreen(screen.x, screen.y, screen.width, screen.height);
+        return;
+    }
+    UpdateScreen(screen.x, screen.y, screen.width, screen.height);
+    const std::lock_guard lock(displayMutex_);
+    fullCopy_ = true;
 }
 
 void VirtioGpu::Readback(std::uint32_t x, std::uint32_t y, std::uint32_t width, std::uint32_t height)
@@ -909,6 +1027,21 @@ void VirtioGpu::Cursor3d(const Command& command)
 
 bool VirtioGpu::CopyScanout(ScanoutCopy& copy, DirtyRows& rows)
 {
+    if (textureActive_.load()) {
+        // virgl screen in the shared texture: nothing to copy here.
+        {
+            const std::lock_guard lock(displayMutex_);
+            if (!scanoutActive_) return false;
+            copy.width = scanoutRect_.width;
+            copy.height = scanoutRect_.height;
+        }
+        copy.texture = shared_;
+        const SharedD3DGuard d3d(SharedD3DLock());
+        rows.Add(shared_->dirty);
+        shared_->dirty.Clear();
+        return true;
+    }
+    copy.texture.reset();
     const std::lock_guard lock(displayMutex_);
     if (!scanoutActive_ || !scanout_) return false;
     const auto& rect = scanoutRect_;

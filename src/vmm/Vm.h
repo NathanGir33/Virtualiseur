@@ -83,6 +83,7 @@ struct VmConfig {
     bool rtcLocalTime = false;     // Hardware clock in local time (Windows) instead of UTC.
     bool audio = true;             // virtio-sound card played on the default Windows output.
     bool hyperv = true;            // Hyper-V enlightenments (reference TSC page, synthetic timers).
+    bool gpuShare = true;          // virgl screen shown from a shared Direct3D texture (no readback).
 };
 
 // What the display window should render.
@@ -95,6 +96,7 @@ struct DisplaySnapshot {
     const volatile std::uint16_t* text = nullptr;
     std::uint16_t cursor = 0;
     bool cursorVisible = false;
+    std::shared_ptr<SharedScanout> texture; // virgl screen as a Direct3D texture (instead of `framebuffer`).
 };
 
 enum class VmState { Starting, Running, Paused, Stopped };
@@ -133,6 +135,11 @@ public:
     // virtio-gpu screen (thread-safe). CopyGpuScanout returns false while
     // the guest shows the boot framebuffer instead.
     bool CopyGpuScanout(ScanoutCopy& copy, DirtyRows& rows);
+    // The window draws with Direct2D and can show the virgl screen straight
+    // from a shared GPU texture (otherwise: readback to system memory).
+    void SetGpuTextureDisplay(bool enabled);
+    // Allows the shared GPU texture at all (--gpu-share, control pipe).
+    void SetGpuShareAllowed(bool allowed);
     bool GpuCursorSnapshot(GpuCursor& cursor);
     // Asks the guest to adopt this resolution (window resized).
     void RequestDisplaySize(std::uint32_t width, std::uint32_t height);
