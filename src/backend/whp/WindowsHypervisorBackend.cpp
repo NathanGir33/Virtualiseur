@@ -3,6 +3,7 @@
 #include <limits>
 #include <array>
 #include <bit>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,42 @@ struct LocalApicState {
     } registers[256];
 };
 static_assert(sizeof(LocalApicState) == 4096);
+
+// Doorbell entry points, resolved at run time: notification ports exist
+// from Windows 11 / Server 2022, the older doorbell calls from Windows 10
+// 1903. Linking them statically would stop the VMM from starting elsewhere.
+struct DoorbellApi {
+    using CreatePort = HRESULT(WINAPI*)(WHV_PARTITION_HANDLE, const WHV_NOTIFICATION_PORT_PARAMETERS*, HANDLE,
+                                        WHV_NOTIFICATION_PORT_HANDLE*);
+    using DeletePort = HRESULT(WINAPI*)(WHV_PARTITION_HANDLE, WHV_NOTIFICATION_PORT_HANDLE);
+    using Register = HRESULT(WINAPI*)(WHV_PARTITION_HANDLE, const WHV_DOORBELL_MATCH_DATA*, HANDLE);
+    using Unregister = HRESULT(WINAPI*)(WHV_PARTITION_HANDLE, const WHV_DOORBELL_MATCH_DATA*);
+
+    CreatePort createPort = nullptr;
+    DeletePort deletePort = nullptr;
+    Register registerEvent = nullptr;
+    Unregister unregisterEvent = nullptr;
+
+    static const DoorbellApi& Get()
+    {
+        static const DoorbellApi api = [] {
+            DoorbellApi result;
+            if (const HMODULE module = GetModuleHandleW(L"WinHvPlatform.dll")) {
+                result.createPort = reinterpret_cast<CreatePort>(GetProcAddress(module, "WHvCreateNotificationPort"));
+                result.deletePort = reinterpret_cast<DeletePort>(GetProcAddress(module, "WHvDeleteNotificationPort"));
+                result.registerEvent = reinterpret_cast<Register>(GetProcAddress(module, "WHvRegisterPartitionDoorbellEvent"));
+                result.unregisterEvent = reinterpret_cast<Unregister>(GetProcAddress(module, "WHvUnregisterPartitionDoorbellEvent"));
+            }
+            return result;
+        }();
+        return api;
+    }
+};
+
+struct Doorbell {
+    WHV_NOTIFICATION_PORT_HANDLE port = nullptr; // Notification port API.
+    WHV_DOORBELL_MATCH_DATA match{};             // Older doorbell API.
+};
 
 std::runtime_error MakeWHPError(const char* operation, HRESULT result)
 {
@@ -335,6 +372,51 @@ bool Partition::CancelRunVirtualProcessor(std::uint32_t virtualProcessorIndex) n
         return false;
     }
     return SUCCEEDED(WHvCancelRunVirtualProcessor(handle_, virtualProcessorIndex, 0));
+}
+
+void* Partition::CreateDoorbell(std::uint64_t guestPhysicalAddress, HANDLE event) noexcept
+{
+    const auto& api = DoorbellApi::Get();
+    if (handle_ == nullptr || event == nullptr) return nullptr;
+    // One address per queue: any write matches. WHP accepts either Length 0
+    // with no matching at all, or a Length together with MatchOnLength
+    // (Length without MatchOnLength is E_INVALIDARG).
+    WHV_DOORBELL_MATCH_DATA match{};
+    match.GuestAddress = guestPhysicalAddress;
+    match.Length = 0;
+    match.MatchOnValue = 0;
+    match.MatchOnLength = 0;
+    auto* doorbell = new (std::nothrow) Doorbell;
+    if (doorbell == nullptr) return nullptr;
+    doorbell->match = match;
+    lastDoorbellError_ = E_NOTIMPL;
+    if (api.createPort != nullptr && api.deletePort != nullptr) {
+        WHV_NOTIFICATION_PORT_PARAMETERS parameters{};
+        parameters.NotificationPortType = WHvNotificationPortTypeDoorbell;
+        parameters.Doorbell = match;
+        lastDoorbellError_ = api.createPort(handle_, &parameters, event, &doorbell->port);
+        if (SUCCEEDED(lastDoorbellError_)) return doorbell;
+        doorbell->port = nullptr;
+    }
+    if (api.registerEvent != nullptr && api.unregisterEvent != nullptr) {
+        const HRESULT result = api.registerEvent(handle_, &match, event);
+        if (SUCCEEDED(result)) return doorbell;
+        if (lastDoorbellError_ == E_NOTIMPL) lastDoorbellError_ = result;
+    }
+    delete doorbell;
+    return nullptr;
+}
+
+void Partition::DeleteDoorbell(void* value) noexcept
+{
+    auto* doorbell = static_cast<Doorbell*>(value);
+    if (doorbell == nullptr) return;
+    const auto& api = DoorbellApi::Get();
+    if (handle_ != nullptr) {
+        if (doorbell->port != nullptr) (void)api.deletePort(handle_, doorbell->port);
+        else (void)api.unregisterEvent(handle_, &doorbell->match);
+    }
+    delete doorbell;
 }
 
 void* Partition::GetHostAddressForGuestPhysicalAddress(

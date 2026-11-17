@@ -230,6 +230,7 @@ private:
     std::condition_variable pauseCondition_;
     bool paused_ = false;
 
+    bool doorbells_ = false; // WHP doorbells carry the virtio queue notifications.
     std::atomic_uint64_t exits_ = 0;
     std::atomic_uint64_t ioExits_ = 0;
     std::atomic_uint64_t mmioExits_ = 0;

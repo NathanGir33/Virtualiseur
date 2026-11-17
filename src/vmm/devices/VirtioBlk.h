@@ -26,6 +26,8 @@ protected:
     std::uint64_t DeviceFeatures() const override;
     std::uint8_t ReadDeviceConfig(std::uint32_t offset) override;
     void QueueNotify(std::uint16_t queue) override;
+    // With doorbells, a guest kick wakes the I/O thread directly.
+    HANDLE NotifyEvent(std::uint16_t) override { return wake_; }
     void DeviceReset() override;
 
 private:

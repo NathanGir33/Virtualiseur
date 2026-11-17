@@ -114,6 +114,21 @@ Vm::Vm(const VmConfig& config, SerialOutput serialOutput)
         }
     }
 
+    // Doorbells: try one on an unused address of the PCI hole.
+    if (HANDLE probe = CreateEventW(nullptr, FALSE, FALSE, nullptr)) {
+        if (void* doorbell = partition_->CreateDoorbell(kVirtioMmioBase - 0x1000, probe)) {
+            partition_->DeleteDoorbell(doorbell);
+            doorbells_ = true;
+        }
+        CloseHandle(probe);
+    }
+    if (doorbells_) {
+        VMM_INFO("Notifications virtio : doorbells WHP (sans sortie VM).");
+    } else {
+        VMM_INFO("Notifications virtio : sorties d'E/S (doorbells WHP indisponibles, 0x%08lx).",
+                 static_cast<unsigned long>(partition_->LastDoorbellError()));
+    }
+
     std::uint64_t framebufferBytes = 0;
     if (config_.display == DisplayMode::Graphics) {
         config_.width = std::clamp<std::uint32_t>(config_.width, 640, 3840) & ~7u;
@@ -155,7 +170,9 @@ Vm::~Vm()
     for (auto& thread : vcpus_) {
         if (thread.joinable()) thread.join();
     }
-    // Stop device threads before the partition and guest memory go away.
+    // Stop device threads before the partition and guest memory go away;
+    // notification threads first, they reach the network backend.
+    for (auto& function : pciFunctions_) function->Shutdown();
     agent_.reset();
     network_.reset();
     pciFunctions_.clear();
@@ -226,7 +243,7 @@ void Vm::BuildDevices()
 
     const auto placement = [this, sink](std::uint8_t slot, std::uint32_t gsi) {
         return VirtioPlacement{ioBus_, mmioBus_, *sink, static_cast<std::uint16_t>(0xC000 + slot * 0x100),
-                               kVirtioMmioBase + slot * 0x10000u, gsi};
+                               kVirtioMmioBase + slot * 0x10000u, gsi, doorbells_ ? partition_.get() : nullptr};
     };
 
     if (config_.network != NetworkMode::None) {

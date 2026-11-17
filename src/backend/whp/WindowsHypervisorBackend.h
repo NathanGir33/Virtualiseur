@@ -65,6 +65,12 @@ public:
     std::uint32_t GetLocalApicRegister(
         std::uint32_t virtualProcessorIndex, std::uint32_t registerOffset) const;
     bool CancelRunVirtualProcessor(std::uint32_t virtualProcessorIndex) noexcept;
+    // Doorbell: a guest write to `guestPhysicalAddress` (an unmapped GPA)
+    // signals `event` inside the hypervisor, without a VM exit to the VMM.
+    // Returns nullptr when this host lacks doorbells or refuses the address.
+    void* CreateDoorbell(std::uint64_t guestPhysicalAddress, HANDLE event) noexcept;
+    void DeleteDoorbell(void* doorbell) noexcept;
+    HRESULT LastDoorbellError() const noexcept { return lastDoorbellError_; }
     void* GetHostAddressForGuestPhysicalAddress(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes) const noexcept;
     WHV_TRANSLATE_GVA_RESULT TranslateGuestVirtualAddress(
         std::uint32_t virtualProcessorIndex,
@@ -85,6 +91,7 @@ private:
 
     WHV_PARTITION_HANDLE handle_ = nullptr;
     WHV_SYNTHETIC_PROCESSOR_FEATURES syntheticFeatures_{};
+    HRESULT lastDoorbellError_ = S_OK;
     std::vector<std::uint32_t> createdProcessors_;
     std::vector<MemoryMapping> memoryMappings_;
 };

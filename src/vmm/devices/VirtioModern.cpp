@@ -1,5 +1,7 @@
 #include "VirtioModern.h"
 
+#include "../core/Log.h"
+
 namespace vmm {
 namespace {
 constexpr std::uint8_t kStatusDriverOk = 0x04;
@@ -17,7 +19,8 @@ VirtioModernDevice::VirtioModernDevice(std::uint16_t virtioType, std::uint8_t cl
                                        const GuestMemory& memory, const VirtioPlacement& placement,
                                        std::size_t queueCount)
     : PciFunction(0x1AF4, static_cast<std::uint16_t>(0x1040 + virtioType), classCode, subclass, 0x00, 0x01),
-      memory_(memory), queues_(queueCount), sink_(placement.sink), gsi_(placement.gsi),
+      memory_(memory), queues_(queueCount), sink_(placement.sink), doorbellPartition_(placement.doorbells),
+      queueEvents_(queueCount, nullptr), doorbells_(queueCount, nullptr), gsi_(placement.gsi),
       queueConfig_(queueCount), msix_(queueCount + 1)
 {
     AttachIoBus(&placement.ioBus);
@@ -32,10 +35,17 @@ VirtioModernDevice::VirtioModernDevice(std::uint16_t virtioType, std::uint8_t cl
     // Capability list: common, notify, ISR, device configuration, MSI-X.
     config_[0x06] |= 0x10;
     config_[0x34] = 0x40;
-    AddCapability(0x40, 0x50, kCapCommon, kCommonOffset, kCommonLength);
-    AddCapability(0x50, 0x64, kCapNotify, kNotifyOffset, 2, 4); // notify_off_multiplier = 0.
-    AddCapability(0x64, 0x74, kCapIsr, kIsrOffset, 1);
-    AddCapability(0x74, kMsixCapability, kCapDevice, kDeviceOffset, kDeviceLength);
+    AddCapability(0x40, 0x50, kCapCommon, 0, kCommonOffset, kCommonLength);
+    if (doorbellPartition_ != nullptr) {
+        // One notification address per queue in BAR1, each with its doorbell.
+        AddCapability(0x50, 0x64, kCapNotify, 1, kDoorbellOffset,
+                      static_cast<std::uint32_t>(queueCount * kDoorbellStride), 4);
+        config_[0x60] = static_cast<std::uint8_t>(kDoorbellStride); // notify_off_multiplier.
+    } else {
+        AddCapability(0x50, 0x64, kCapNotify, 0, kNotifyOffset, 2, 4); // notify_off_multiplier = 0.
+    }
+    AddCapability(0x64, 0x74, kCapIsr, 0, kIsrOffset, 1);
+    AddCapability(0x74, kMsixCapability, kCapDevice, 0, kDeviceOffset, kDeviceLength);
 
     auto* msix = &config_[kMsixCapability];
     msix[0] = 0x11;
@@ -52,7 +62,28 @@ VirtioModernDevice::VirtioModernDevice(std::uint16_t virtioType, std::uint8_t cl
     }
 }
 
-void VirtioModernDevice::AddCapability(std::uint8_t position, std::uint8_t next, std::uint8_t type,
+VirtioModernDevice::~VirtioModernDevice()
+{
+    Shutdown();
+    for (auto& event : queueEvents_) {
+        if (event != nullptr) CloseHandle(event);
+    }
+    if (stopEvent_ != nullptr) CloseHandle(stopEvent_);
+}
+
+void VirtioModernDevice::Shutdown()
+{
+    if (notifyThread_.joinable()) {
+        notifyThread_.request_stop();
+        SetEvent(stopEvent_);
+        notifyThread_.join();
+    }
+    const DeviceGuard guard(lock_);
+    UnregisterDoorbells();
+    doorbellsArmed_ = false;
+}
+
+void VirtioModernDevice::AddCapability(std::uint8_t position, std::uint8_t next, std::uint8_t type, std::uint8_t bar,
                                        std::uint32_t offset, std::uint32_t length, std::uint8_t extraLength)
 {
     auto* cap = &config_[position];
@@ -60,7 +91,7 @@ void VirtioModernDevice::AddCapability(std::uint8_t position, std::uint8_t next,
     cap[1] = next;
     cap[2] = static_cast<std::uint8_t>(16 + extraLength);
     cap[3] = type;
-    cap[4] = 0; // BAR0.
+    cap[4] = bar;
     for (int byte = 0; byte < 4; ++byte) {
         cap[8 + byte] = static_cast<std::uint8_t>(offset >> (byte * 8));
         cap[12 + byte] = static_cast<std::uint8_t>(length >> (byte * 8));
@@ -129,7 +160,8 @@ std::uint32_t VirtioModernDevice::ReadCommon(std::uint32_t offset, std::uint8_t 
         put(0x18, queue.size, 2);
         put(0x1A, queue.vector, 2);
         put(0x1C, queue.enabled ? 1 : 0, 2);
-        put(0x1E, 0, 2); // queue_notify_off: every queue shares the notify register.
+        // queue_notify_off: one doorbell per queue, or one shared I/O register.
+        put(0x1E, doorbellPartition_ != nullptr ? selected_ : 0, 2);
         put(0x20, queue.descriptors, 8);
         put(0x28, queue.driver, 8);
         put(0x30, queue.device, 8);
@@ -189,6 +221,7 @@ void VirtioModernDevice::WriteCommon(std::uint32_t offset, std::uint8_t size, st
         if (queue != nullptr && (value & 1) != 0 && !queue->enabled) {
             queue->enabled = true;
             queues_[selected_].Enable(queue->descriptors, queue->driver, queue->device, queue->size);
+            ArmDoorbells();
         }
         break;
     case 0x20: case 0x24: if (queue != nullptr) setHalf(queue->descriptors, 0x20); break;
@@ -325,6 +358,7 @@ void VirtioModernDevice::WriteMsixDword(std::uint32_t offset, std::uint32_t valu
 std::uint64_t VirtioModernDevice::MmioRead(std::uint64_t address, std::uint8_t size)
 {
     const auto offset = static_cast<std::uint32_t>(address - MmioBarBase(1));
+    if (offset >= kDoorbellOffset) return 0;
     const auto aligned = offset & ~3u;
     std::uint64_t value = ReadMsixDword(aligned);
     if (size == 8) value |= static_cast<std::uint64_t>(ReadMsixDword(aligned + 4)) << 32;
@@ -335,10 +369,99 @@ std::uint64_t VirtioModernDevice::MmioRead(std::uint64_t address, std::uint8_t s
 void VirtioModernDevice::MmioWrite(std::uint64_t address, std::uint8_t size, std::uint64_t value)
 {
     const auto offset = static_cast<std::uint32_t>(address - MmioBarBase(1));
+    if (offset >= kDoorbellOffset) {
+        // A kick the doorbell did not catch (registration refused): an MMIO
+        // exit instead, handled here on the vCPU.
+        const auto queue = static_cast<std::uint16_t>((offset - kDoorbellOffset) / kDoorbellStride);
+        if (queue < queues_.size() && queues_[queue].Ready()) QueueNotify(queue);
+        return;
+    }
     // The table is written with 32- or 64-bit accesses (PCI spec 6.8.2).
     if ((offset & 3) != 0 || size < 4) return;
     WriteMsixDword(offset, static_cast<std::uint32_t>(value));
     if (size == 8) WriteMsixDword(offset + 4, static_cast<std::uint32_t>(value >> 32));
+}
+
+// --- Doorbells -----------------------------------------------------------------------------------
+
+void VirtioModernDevice::ArmDoorbells()
+{
+    if (doorbellPartition_ == nullptr || doorbellsArmed_) return;
+    doorbellsArmed_ = true;
+    bool ownEvents = false;
+    for (std::uint16_t queue = 0; queue < queues_.size(); ++queue) {
+        if (NotifyEvent(queue) != nullptr || queueEvents_[queue] != nullptr) continue;
+        queueEvents_[queue] = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        ownEvents = ownEvents || queueEvents_[queue] != nullptr;
+    }
+    if (ownEvents && !notifyThread_.joinable()) {
+        if (stopEvent_ == nullptr) stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        notifyThread_ = std::jthread([this](std::stop_token stop) { NotifyThread(stop); });
+    }
+    if (const auto base = MmioBarBase(1); base != 0) RegisterDoorbells(base);
+}
+
+void VirtioModernDevice::MmioBarChanged(std::uint32_t index, std::uint32_t base, bool mapped)
+{
+    // The guest moved BAR1: the doorbells follow it.
+    if (index != 1 || !doorbellsArmed_) return;
+    UnregisterDoorbells();
+    if (mapped) RegisterDoorbells(base);
+}
+
+void VirtioModernDevice::RegisterDoorbells(std::uint32_t barBase)
+{
+    for (std::uint16_t queue = 0; queue < queues_.size(); ++queue) {
+        if (doorbells_[queue] != nullptr) continue;
+        HANDLE event = NotifyEvent(queue);
+        if (event == nullptr) event = queueEvents_[queue];
+        const auto address = static_cast<std::uint64_t>(barBase) + kDoorbellOffset + queue * kDoorbellStride;
+        doorbells_[queue] = doorbellPartition_->CreateDoorbell(address, event);
+        if (doorbells_[queue] == nullptr && !doorbellFailureLogged_) {
+            doorbellFailureLogged_ = true;
+            VMM_WARN("Doorbell WHP refusé à 0x%llx : notifications par sortie MMIO.",
+                     static_cast<unsigned long long>(address));
+        }
+    }
+}
+
+void VirtioModernDevice::UnregisterDoorbells()
+{
+    for (auto& doorbell : doorbells_) {
+        if (doorbell == nullptr) continue;
+        doorbellPartition_->DeleteDoorbell(doorbell);
+        doorbell = nullptr;
+    }
+}
+
+void VirtioModernDevice::ServiceQueue(std::uint16_t queue)
+{
+    const DeviceGuard guard(lock_);
+    if (queue < queues_.size() && queues_[queue].Ready()) QueueNotify(queue);
+}
+
+void VirtioModernDevice::NotifyThread(std::stop_token stop)
+{
+    SetThreadDescription(GetCurrentThread(), L"virtio notifications");
+    std::vector<HANDLE> handles{stopEvent_};
+    std::vector<std::uint16_t> queueOf{0};
+    for (std::uint16_t queue = 0; queue < queueEvents_.size(); ++queue) {
+        if (queueEvents_[queue] == nullptr) continue;
+        handles.push_back(queueEvents_[queue]);
+        queueOf.push_back(queue);
+    }
+    while (!stop.stop_requested()) {
+        const DWORD result = WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+        if (result == WAIT_OBJECT_0 || result == WAIT_FAILED) break;
+        const auto first = result - WAIT_OBJECT_0;
+        if (first >= handles.size()) continue;
+        ServiceQueue(queueOf[first]);
+        // WaitForMultipleObjects favours the lowest index: give the other
+        // signalled queues their turn before waiting again.
+        for (std::size_t index = 1; index < handles.size(); ++index) {
+            if (index != first && WaitForSingleObject(handles[index], 0) == WAIT_OBJECT_0) ServiceQueue(queueOf[index]);
+        }
+    }
 }
 
 } // namespace vmm

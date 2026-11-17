@@ -38,6 +38,9 @@ public:
 
     virtual std::uint32_t ConfigRead(std::uint32_t offset, std::uint8_t size);
     virtual void ConfigWrite(std::uint32_t offset, std::uint8_t size, std::uint32_t value);
+    // Stops the function's own threads before the VM tears down what they
+    // use (network backend, guest memory). vCPUs are already stopped.
+    virtual void Shutdown() {}
 
     std::uint16_t Command() const noexcept { return static_cast<std::uint16_t>(config_[4] | (config_[5] << 8)); }
     bool BusMasterEnabled() const noexcept { return (Command() & 0x04) != 0; }
