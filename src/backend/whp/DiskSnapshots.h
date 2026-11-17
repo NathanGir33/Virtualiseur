@@ -30,6 +30,10 @@ public:
         std::wstring date;   // "YYYY-MM-DD HH:MM:SS", local time.
         std::wstring layer;  // File name (same folder): frozen layer or the base image.
         std::uint32_t parent = 0; // Snapshot this one derives from (0: none).
+        // How it was taken: "off" (VM stopped), "frozen" (running, guest file
+        // systems frozen by qemu-guest-agent) or "crash" (running without the
+        // freeze: consistent as after a power cut).
+        std::wstring state = L"off";
     };
 
     // Loads the store of `baseDisk` (empty when no snapshot was ever taken).
@@ -47,6 +51,17 @@ public:
     std::uint64_t LayerBytes() const;
 
     std::uint32_t Take(const std::wstring& name, const std::wstring& description);
+
+    // Running VM (the caller owns the open disk and switches it with
+    // VirtualDisk::PushLayer): creates the new current layer over the current
+    // one and records the snapshot. AbortLive undoes it if the switch fails.
+    struct LiveTake {
+        std::uint32_t id = 0;
+        std::filesystem::path layer; // The new current layer.
+        std::wstring previous;       // The previous current layer (empty: base).
+    };
+    LiveTake BeginLive(const std::wstring& name, const std::wstring& description, const std::wstring& state);
+    void AbortLive(const LiveTake& take);
     void Restore(std::uint32_t id);
     void Remove(std::uint32_t id);
 

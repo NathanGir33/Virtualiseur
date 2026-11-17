@@ -132,6 +132,7 @@ void SnapshotStore::Load()
             else if (key == "description") section->description = value;
             else if (key == "date") section->date = value;
             else if (key == "layer") section->layer = value;
+            else if (key == "state") section->state = value;
         }
     }
     // A snapshot without a usable layer cannot be restored: drop it.
@@ -154,7 +155,8 @@ void SnapshotStore::Save() const
              << "name=" << ToUtf8(SingleLine(snapshot.name)) << "\n"
              << "description=" << ToUtf8(SingleLine(snapshot.description)) << "\n"
              << "date=" << ToUtf8(snapshot.date) << "\n"
-             << "layer=" << ToUtf8(snapshot.layer) << "\n";
+             << "layer=" << ToUtf8(snapshot.layer) << "\n"
+             << "state=" << ToUtf8(snapshot.state) << "\n";
     }
     // Write a temporary file, then replace: the metadata is never half-written.
     const auto target = MetadataPath();
@@ -283,6 +285,52 @@ std::uint32_t SnapshotStore::Take(const std::wstring& name, const std::wstring& 
     }
     ComputeParents();
     return snapshot.id;
+}
+
+SnapshotStore::LiveTake SnapshotStore::BeginLive(const std::wstring& name, const std::wstring& description,
+                                                 const std::wstring& state)
+{
+    // No RequireStopped: the caller is the VM that has the disk open.
+    const auto top = current_.empty() ? baseName_ : current_;
+    const auto size = LayerFile::SizeOf(PathOf(top));
+    if (size == 0) throw std::runtime_error("Disque de la machine illisible : " + PathOf(top).string());
+    LiveTake take;
+    take.previous = current_;
+    const auto layer = NewLayerName();
+    LayerFile::Create(PathOf(layer), top, size);
+    take.layer = PathOf(layer);
+    Snapshot snapshot;
+    snapshot.id = next_++;
+    snapshot.name = name;
+    snapshot.description = description;
+    snapshot.date = Now();
+    snapshot.layer = top;
+    snapshot.state = state;
+    snapshots_.push_back(snapshot);
+    current_ = layer;
+    // Recorded before the switch: if the VM stopped right after, the new
+    // (empty) current layer over the old top still shows every write.
+    try {
+        Save();
+    } catch (...) {
+        snapshots_.pop_back();
+        current_ = take.previous;
+        std::filesystem::remove(take.layer);
+        throw;
+    }
+    take.id = snapshot.id;
+    ComputeParents();
+    return take;
+}
+
+void SnapshotStore::AbortLive(const LiveTake& take)
+{
+    std::erase_if(snapshots_, [&](const Snapshot& snapshot) { return snapshot.id == take.id; });
+    current_ = take.previous;
+    Save();
+    std::error_code ignored;
+    std::filesystem::remove(take.layer, ignored);
+    ComputeParents();
 }
 
 void SnapshotStore::Restore(std::uint32_t id)

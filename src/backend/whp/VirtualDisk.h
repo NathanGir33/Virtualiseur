@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <vector>
 
@@ -42,6 +43,10 @@ public:
     void ReadSectors(std::uint64_t lba, std::span<std::byte> destination) const;
     void WriteSectors(std::uint64_t lba, std::span<const std::byte> source);
     void Flush();
+    // Running VM, live snapshot: flushes the current top (layer or raw
+    // image), reopens it read-only and puts the empty layer `newTop` (whose
+    // parent it is) on top. In-flight I/O completes first; new I/O waits.
+    void PushLayer(const std::filesystem::path& newTop);
 
 private:
     VirtualDisk(HANDLE file, std::filesystem::path path, std::uint64_t sizeBytes, bool readOnly) noexcept;
@@ -55,6 +60,8 @@ private:
     bool readOnly_ = false;
     std::vector<LayerFile> layers_; // Top first; file_ is then the read-only raw base.
     mutable std::mutex ioMutex_;
+    // Shared by every I/O, exclusive while PushLayer swaps the top.
+    mutable std::shared_mutex switchMutex_;
 };
 
 } // namespace virtualiseur::whp

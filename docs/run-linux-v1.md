@@ -104,7 +104,7 @@ Un dossier ajouté pendant que la machine tourne n'apparaît qu'au démarrage su
 
 ## Instantanés
 
-Bouton **Instantanés** du gestionnaire (machine éteinte) : *Prendre* fige le disque, *Restaurer* le ramène à un instantané (les modifications faites depuis sont perdues), *Supprimer* retire un instantané sans changer l'état actuel ni les autres. Seul le disque est sauvegardé, pas la mémoire : restaurer revient à redémarrer la machine dans cet état. Les couches (`disk-<n>.layer`) et `disk.snapshots.ini` sont à côté de `disk.img` ; ne les déplace pas séparément. En ligne de commande : `VirtualiseurVM.exe --disk disk.img --snapshot list|take <nom>|restore <n>|delete <n>`.
+Bouton **Instantanés** du gestionnaire : *Prendre* fige le disque, même machine allumée (avec qemu-guest-agent, ses systèmes de fichiers sont gelés une seconde pour un disque propre ; sans lui, l'instantané est marqué « sans gel », cohérent comme après une coupure de courant). Machine éteinte seulement : *Restaurer* le ramène à un instantané (les modifications faites depuis sont perdues), *Supprimer* retire un instantané sans changer l'état actuel ni les autres. Seul le disque est sauvegardé, pas la mémoire : restaurer revient à redémarrer la machine dans cet état. Les couches (`disk-<n>.layer`) et `disk.snapshots.ini` sont à côté de `disk.img` ; ne les déplace pas séparément. En ligne de commande : `VirtualiseurVM.exe --disk disk.img --snapshot list|take <nom>|restore <n>|delete <n>`.
 
 ## 7. Diagnostic
 

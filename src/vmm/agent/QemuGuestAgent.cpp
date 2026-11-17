@@ -307,6 +307,71 @@ bool QemuGuestAgent::Execute(const std::string& script, int& exitCode, std::stri
     return false;
 }
 
+QemuGuestAgent::FreezeResult QemuGuestAgent::Freeze(std::chrono::milliseconds timeout)
+{
+    const std::lock_guard exchange(exchangeMutex_);
+    FreezeResult result;
+    if (!open_) {
+        result.reason = "qemu-guest-agent absent de l'invité";
+        return result;
+    }
+    {
+        const std::lock_guard guard(mutex_);
+        if (suspended_) {
+            result.reason = "machine en pause";
+            return result;
+        }
+    }
+    if (!synchronized_) {
+        synchronized_ = Synchronize();
+        if (!synchronized_) {
+            result.reason = "qemu-guest-agent ne répond pas";
+            return result;
+        }
+    }
+    // From here on the agent may freeze, even if its answer comes too late:
+    // a thaw is owed in every case.
+    result.sent = true;
+    const auto reply = Call(R"({"execute":"guest-fsfreeze-freeze"})", timeout);
+    if (!reply) {
+        synchronized_ = false; // The late reply must not be taken for another one.
+        result.reason = "gel sans réponse en " + std::to_string(timeout.count() / 1000) + " s";
+        return result;
+    }
+    const auto error = ErrorText(*reply);
+    if (!error.empty()) {
+        result.reason = "gel refusé par l'invité : " + error;
+        return result;
+    }
+    const auto count = ReturnInteger(*reply);
+    result.frozen = count ? static_cast<int>(*count) : 0;
+    if (result.frozen == 0) result.reason = "aucun système de fichiers gelé";
+    return result;
+}
+
+void QemuGuestAgent::Thaw()
+{
+    const std::lock_guard exchange(exchangeMutex_);
+    if (!synchronized_) {
+        // The freeze did not answer in time: the agent is busy (or stuck)
+        // with it. It runs commands in order, so the thaw queued behind the
+        // freeze will run right after it; waiting here would only delay the
+        // snapshot's reply. The next exchange resynchronizes.
+        Write("{\"execute\":\"guest-fsfreeze-thaw\"}\n");
+        VMM_INFO("Agent QEMU : dégel envoyé à la suite du gel en attente.");
+        return;
+    }
+    const auto reply = Call(R"({"execute":"guest-fsfreeze-thaw"})", std::chrono::seconds(10));
+    if (!reply) {
+        synchronized_ = false;
+        VMM_WARN("Agent QEMU : pas de réponse au dégel (guest-fsfreeze-thaw envoyé).");
+        return;
+    }
+    const auto error = ErrorText(*reply);
+    if (!error.empty()) VMM_DEBUG("Agent QEMU : dégel : %s", error.c_str());
+    else if (const auto count = ReturnInteger(*reply)) VMM_DEBUG("Agent QEMU : %lld système(s) de fichiers dégelé(s).", *count);
+}
+
 void QemuGuestAgent::MountShares()
 {
     // Tags are restricted to [A-Za-z0-9._-] (Virtio9p): safe in the command line.
@@ -354,8 +419,11 @@ void QemuGuestAgent::Worker()
         if (!pendingReason_.empty()) reason = std::exchange(pendingReason_, {});
         if (!open_ || suspended_) continue;
         lock.unlock();
-        CheckTime(reason);
-        if (std::exchange(mountPending_, false)) MountShares(); // Sets it again if the agent did not answer.
+        {
+            const std::lock_guard exchange(exchangeMutex_);
+            CheckTime(reason);
+            if (std::exchange(mountPending_, false)) MountShares(); // Sets it again if the agent did not answer.
+        }
         lock.lock();
     }
 }

@@ -181,6 +181,7 @@ void VirtualDisk::ReadSectors(std::uint64_t lba, std::span<std::byte> destinatio
         throw std::out_of_range("Lecture au-dela de la capacite du disque virtuel.");
     }
     if (destination.empty()) return;
+    const std::shared_lock switchLock(switchMutex_);
 
     if (!layers_.empty()) {
         // Block by block, each from the topmost layer that has it.
@@ -233,6 +234,7 @@ void VirtualDisk::WriteSectors(std::uint64_t lba, std::span<const std::byte> sou
         throw std::out_of_range("Ecriture au-dela de la capacite du disque virtuel.");
     }
     if (source.empty()) return;
+    const std::shared_lock switchLock(switchMutex_);
 
     if (!layers_.empty()) {
         const std::lock_guard lock(ioMutex_);
@@ -286,6 +288,7 @@ void VirtualDisk::WriteSectors(std::uint64_t lba, std::span<const std::byte> sou
 void VirtualDisk::Flush()
 {
     if (readOnly_) return;
+    const std::shared_lock switchLock(switchMutex_);
     if (!layers_.empty()) {
         const std::lock_guard lock(ioMutex_);
         layers_.front().Flush();
@@ -294,6 +297,39 @@ void VirtualDisk::Flush()
     if (!FlushFileBuffers(file_)) {
         ThrowLastError("FlushFileBuffers");
     }
+}
+
+void VirtualDisk::PushLayer(const std::filesystem::path& newTop)
+{
+    if (readOnly_) throw std::logic_error("Disque en lecture seule : pas d'instantané.");
+    // Waits for in-flight requests; the guest's next ones wait for the swap.
+    const std::unique_lock switchLock(switchMutex_);
+    const std::lock_guard ioLock(ioMutex_);
+
+    // Open the new top first: if it fails, nothing has changed.
+    auto top = LayerFile::Open(newTop, true);
+    if (top.VirtualSize() != sizeBytes_) throw std::runtime_error("Nouvelle couche de taille différente.");
+    const auto current = layers_.empty() ? path_ : layers_.front().Path();
+    if (_wcsicmp(top.ParentName().c_str(), current.filename().c_str()) != 0) {
+        throw std::runtime_error("La nouvelle couche ne repose pas sur la couche actuelle.");
+    }
+
+    // The current top becomes the snapshot: everything written so far must
+    // be on disk before it is closed and reopened read-only.
+    if (layers_.empty()) {
+        if (!FlushFileBuffers(file_)) ThrowLastError("FlushFileBuffers");
+        CloseHandle(file_);
+        file_ = CreateFileW(path_.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
+        if (file_ == INVALID_HANDLE_VALUE) ThrowLastError("CreateFileW(base en lecture seule)");
+    } else {
+        layers_.front().Flush();
+        const auto path = layers_.front().Path();
+        layers_.front() = LayerFile{};
+        layers_.front() = LayerFile::Open(path, false);
+    }
+    layers_.insert(layers_.begin(), std::move(top));
+    path_ = newTop;
 }
 
 void VirtualDisk::ReadFromChain(std::size_t fromLayer, std::uint64_t block, std::uint32_t offset,

@@ -57,6 +57,17 @@ public:
     // in the guest on /media/<tag> each time it connects (guest-exec).
     void SetShares(std::vector<std::string> tags) { shares_ = std::move(tags); }
 
+    // Live snapshots. Freeze sends guest-fsfreeze-freeze and waits at most
+    // `timeout`; `sent` tells whether a thaw is owed. Thaw sends
+    // guest-fsfreeze-thaw (after a resynchronization, the freeze reply may be late).
+    struct FreezeResult {
+        bool sent = false;
+        int frozen = 0;     // File systems frozen (0: not frozen).
+        std::string reason; // Why not, in French, when frozen == 0.
+    };
+    FreezeResult Freeze(std::chrono::milliseconds timeout);
+    void Thaw();
+
 private:
     void Worker();
     // Sends one command and waits for its reply line (without the 0xFF
@@ -74,6 +85,8 @@ private:
     std::string partial_;        // Incomplete reply line (device lock).
     std::atomic_bool open_ = false;
 
+    // One command exchange at a time (worker checks, freeze, thaw).
+    std::mutex exchangeMutex_;
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::deque<std::string> replies_;

@@ -153,6 +153,11 @@ public:
     VmConfig CurrentConfig() const;
     // Guest clock: checks it now through qemu-guest-agent (when the guest runs it).
     void SyncGuestTime(const char* reason);
+    // Live disk snapshot: freezes the guest file systems through
+    // qemu-guest-agent (4 s at most), switches the disk to a new layer, thaws.
+    // Without the freeze the snapshot is taken anyway, crash-consistent.
+    // `state` is "frozen" or "crash"; `detail` says how, in French.
+    std::uint32_t TakeLiveSnapshot(const std::wstring& name, std::string& state, std::string& detail);
     DisplaySnapshot Display() const;
     // Adds the boot framebuffer rows changed since the previous call.
     void FramebufferDirtyRows(DirtyRows& rows) const

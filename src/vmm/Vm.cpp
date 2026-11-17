@@ -673,6 +673,52 @@ VmConfig Vm::CurrentConfig() const
     return config_;
 }
 
+std::uint32_t Vm::TakeLiveSnapshot(const std::wstring& name, std::string& state, std::string& detail)
+{
+    if (!disk_) throw std::runtime_error("Cette machine n'a pas de disque.");
+
+    // 1. Freeze, with no disk lock held: the guest syncs its dirty data to
+    //    the disk while freezing, so its I/O must keep flowing meanwhile.
+    QemuGuestAgent::FreezeResult freeze;
+    if (qemuAgent_) freeze = qemuAgent_->Freeze(std::chrono::seconds(4));
+    else freeze.reason = "pas de canal qemu-guest-agent";
+
+    // 2. Thaw owed as soon as the freeze was sent, whatever happens below.
+    struct ThawGuard {
+        QemuGuestAgent* agent;
+        bool owed;
+        ~ThawGuard()
+        {
+            if (owed && agent != nullptr) agent->Thaw();
+        }
+    } thaw{qemuAgent_.get(), freeze.sent};
+
+    const bool frozen = freeze.frozen > 0;
+    state = frozen ? "frozen" : "crash";
+    std::wstring description;
+    if (frozen) {
+        detail = std::to_string(freeze.frozen) + " système(s) de fichiers gelé(s)";
+        description = L"Machine allumée, " + WidenUtf8(detail) + L".";
+    } else {
+        detail = "sans gel (" + freeze.reason + ") : cohérent comme après une coupure de courant";
+        description = L"Machine allumée, " + WidenUtf8(detail) + L".";
+    }
+
+    // 3. New current layer (recorded first), then the switch under the
+    //    disk's exclusive lock: flush, reopen read-only, new top.
+    virtualiseur::whp::SnapshotStore store(config_.disk);
+    const auto take = store.BeginLive(name, description, frozen ? L"frozen" : L"crash");
+    try {
+        disk_->PushLayer(take.layer);
+    } catch (...) {
+        store.AbortLive(take);
+        throw;
+    }
+    VMM_INFO("Instantané %u pris, machine allumée : %s. Couche active : %s.", take.id, detail.c_str(),
+             PathUtf8(take.layer.filename()).c_str());
+    return take.id;
+}
+
 void Vm::SyncGuestTime(const char* reason)
 {
     if (qemuAgent_) qemuAgent_->RequestTimeSync(reason);

@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <utility>
 
 namespace manager {
@@ -1739,7 +1740,53 @@ private:
         AddStatic(-1, L"", kLeft, kHeight - 84, kRight - kLeft, 34, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
         AddButton(-1, IDCANCEL, L"Fermer", kRight - 100, kHeight - 46, 100, 32);
         Reload(0);
-        if (!stopped_) SetMessage(L"La machine est allumée : éteins-la pour prendre, restaurer ou supprimer un instantané.", false);
+        if (!stopped_) {
+            SetMessage(L"Machine allumée : « Prendre » gèle d'abord ses systèmes de fichiers (qemu-guest-agent) ; "
+                       L"restaurer ou supprimer demande de l'éteindre.", false);
+        }
+    }
+
+    // Running VM: the VM process owns the disk and takes the snapshot.
+    void TakeLive(const std::wstring& name)
+    {
+        const int length = WideCharToMultiByte(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0, nullptr, nullptr);
+        std::string command = "snapshot-take ";
+        const auto offset = command.size();
+        command.resize(offset + static_cast<std::size_t>(length));
+        WideCharToMultiByte(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), command.data() + offset, length, nullptr, nullptr);
+        SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+        SetMessage(L"Gel des systèmes de fichiers de la machine…", false);
+        UpdateWindow(window_);
+        const auto reply = SendCommand(vm_.config.name, command.c_str());
+        const auto wide = [](const std::string& text) {
+            std::wstring result(text.size(), L'\0');
+            result.resize(static_cast<std::size_t>(MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                                                       result.data(), static_cast<int>(result.size()))));
+            return result;
+        };
+        if (!reply || reply->rfind("ok ", 0) != 0) {
+            Reload(0);
+            SetMessage(reply ? L"Instantané impossible : " + wide(reply->rfind("error: ", 0) == 0 ? reply->substr(7) : *reply)
+                             : L"La machine ne répond pas.");
+            MessageBeep(MB_ICONWARNING);
+            return;
+        }
+        // "ok <id> <frozen|crash> <detail>"
+        std::istringstream fields(reply->substr(3));
+        std::uint32_t id = 0;
+        std::string state;
+        fields >> id >> state;
+        std::string detail;
+        std::getline(fields, detail);
+        if (!detail.empty() && detail.front() == ' ') detail.erase(0, 1);
+        changed_ = true;
+        SetText(IdSnapshotName, L"");
+        Reload(id);
+        if (state == "frozen") {
+            SetMessage(L"Instantané « " + name + L" » pris, machine allumée (" + wide(detail) + L").", false);
+        } else {
+            SetMessage(L"Instantané « " + name + L" » pris " + wide(detail) + L".");
+        }
     }
 
     void Focus() override { SetFocus(Item(IdSnapshotName)); }
@@ -1755,6 +1802,10 @@ private:
             localtime_s(&local, &now);
             wcsftime(date, 32, L"%d/%m/%Y %H:%M", &local);
             name = L"Instantané du " + std::wstring(date);
+        }
+        if (!stopped_) {
+            TakeLive(name);
+            return false;
         }
         Apply([&](virtualiseur::whp::SnapshotStore& store) {
             const auto id = store.Take(name, L"");
@@ -1856,6 +1907,8 @@ private:
             } else {
                 const auto* snapshot = FindSnapshot(row.id);
                 text += L"●  " + snapshot->name + L"   —   " + snapshot->date;
+                if (snapshot->state == L"frozen") text += L"   (machine allumée)";
+                else if (snapshot->state == L"crash") text += L"   (machine allumée, sans gel)";
             }
             SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
             if (row.id == select) selected = static_cast<int>(index);
@@ -1874,7 +1927,9 @@ private:
         const auto* snapshot = SelectedSnapshot();
         std::wstring detail;
         if (snapshot != nullptr) {
-            detail = L"« " + snapshot->name + L" », pris le " + snapshot->date + L".";
+            detail = L"« " + snapshot->name + L" », pris le " + snapshot->date + L". ";
+            if (!snapshot->description.empty()) detail += snapshot->description;
+            else detail += L"Machine éteinte.";
         } else if (snapshots_.empty()) {
             detail = L"Aucun instantané pour l'instant : « Prendre » fige l'état actuel du disque.";
         } else {
@@ -1883,7 +1938,7 @@ private:
         SetText(IdSnapshotDetail, detail);
         EnableWindow(Item(IdSnapshotRestore), stopped_ && snapshot != nullptr);
         EnableWindow(Item(IdSnapshotDelete), stopped_ && snapshot != nullptr);
-        EnableWindow(Item(IDOK), stopped_);
+        EnableWindow(Item(IDOK), TRUE); // Running: taken live by the VM.
     }
 
     const virtualiseur::whp::SnapshotStore::Snapshot* FindSnapshot(std::uint32_t id) const
