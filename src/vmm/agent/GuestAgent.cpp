@@ -88,9 +88,15 @@ const char* XferResult(std::uint32_t result)
 
 } // namespace
 
-GuestAgent::GuestAgent(DeviceLock& lock) : lock_(lock)
+GuestAgent::GuestAgent()
 {
     worker_ = std::thread([this] { Worker(); });
+}
+
+void GuestAgent::Attach(VirtioSerial* serial) noexcept
+{
+    serial_ = serial;
+    lock_ = serial != nullptr ? &serial->Lock() : nullptr;
 }
 
 GuestAgent::~GuestAgent()
@@ -231,8 +237,9 @@ void GuestAgent::Send(std::uint32_t type, std::span<const std::uint8_t> data)
     message.insert(message.end(), data.begin(), data.end());
 
     std::vector<std::uint8_t> chunk;
-    const DeviceGuard guard(lock_);
-    if (serial_ == nullptr || !open_) return;
+    if (serial_ == nullptr) return;
+    const DeviceGuard guard(*lock_);
+    if (!open_) return;
     for (std::size_t offset = 0; offset < message.size(); offset += kChunkData) {
         const auto size = (std::min)(kChunkData, message.size() - offset);
         chunk.clear();
@@ -246,8 +253,9 @@ void GuestAgent::Send(std::uint32_t type, std::span<const std::uint8_t> data)
 
 std::size_t GuestAgent::Backlog() const
 {
-    const DeviceGuard guard(lock_);
-    return serial_ != nullptr ? serial_->Backlog() : 0;
+    if (serial_ == nullptr) return 0;
+    const DeviceGuard guard(*lock_);
+    return serial_->Backlog();
 }
 
 void GuestAgent::Notice(const std::string& text)

@@ -20,6 +20,9 @@ public:
 
     void AttachIoBus(IoBus* bus) noexcept { ioBus_ = bus; }
     void AttachMmioBus(MmioBus* bus) noexcept { mmioBus_ = bus; }
+    // Lock taken around BAR accesses (default: the VM-wide lock). Set before
+    // declaring the BARs.
+    void SetBarLock(DeviceLock* lock) noexcept { barLock_ = lock; }
 
     // Declares an I/O BAR decoded by `handler`. `size` is a power of two >= 4.
     void SetIoBar(std::uint32_t index, std::uint16_t base, std::uint16_t size, IoDevice* handler);
@@ -65,6 +68,7 @@ private:
     std::array<Bar, 6> bars_{};
     IoBus* ioBus_ = nullptr;
     MmioBus* mmioBus_ = nullptr;
+    DeviceLock* barLock_ = nullptr;
 };
 
 // PCI configuration mechanism #1 (ports 0xCF8-0xCFF) on bus 0, plus the

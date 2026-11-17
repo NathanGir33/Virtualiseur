@@ -21,8 +21,7 @@ namespace vmm {
 // the guest is paced by the host audio clock, as with a real DAC.
 class VirtioSound final : public VirtioModernDevice {
 public:
-    VirtioSound(const GuestMemory& memory, const VirtioPlacement& placement, DeviceLock& lock,
-                std::wstring sessionName);
+    VirtioSound(const GuestMemory& memory, const VirtioPlacement& placement, std::wstring sessionName);
     ~VirtioSound() override;
 
     void SetMuted(bool muted) noexcept { if (output_) output_->SetMuted(muted); }
@@ -64,7 +63,6 @@ private:
     // Audio thread: copies queued samples, completes the drained buffers.
     std::size_t Pull(std::uint8_t* destination, std::size_t bytes);
 
-    DeviceLock& lock_;
     StreamParams params_;
     bool running_ = false;
     bool announced_ = false;

@@ -85,11 +85,11 @@ void SwapRedBlue(std::uint8_t* pixels, std::size_t count)
 
 } // namespace
 
-VirtioGpu::VirtioGpu(const GuestMemory& memory, const VirtioPlacement& placement, DeviceLock& lock,
+VirtioGpu::VirtioGpu(const GuestMemory& memory, const VirtioPlacement& placement,
                      std::uint32_t width, std::uint32_t height,
                      std::uint64_t framebufferBase, std::uint64_t framebufferBytes, bool enable3d)
     : VirtioModernDevice(16, 0x03, 0x00, memory, placement, 2),
-      lock_(lock), displayWidth_(width), displayHeight_(height)
+      displayWidth_(width), displayHeight_(height)
 {
     if (framebufferBytes != 0) {
         std::uint32_t barSize = 1u << 20;

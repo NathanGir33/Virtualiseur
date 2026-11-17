@@ -23,8 +23,9 @@ class VirtioSerial;
 // "com.redhat.spice.0". It provides clipboard sharing and file transfer
 // (files dropped on the window land in the guest's Downloads folder).
 //
-// Guest bytes arrive on a vCPU thread with the device lock held; complete
-// messages are queued for the UI thread, which polls them with Take().
+// Guest bytes arrive on a vCPU thread with the serial port's lock held;
+// complete messages are queued for the UI thread, which polls them with
+// Take().
 class GuestAgent final {
 public:
     static constexpr char kPortName[] = "com.redhat.spice.0";
@@ -50,14 +51,15 @@ public:
         std::vector<std::uint8_t> data;
     };
 
-    explicit GuestAgent(DeviceLock& lock);
+    GuestAgent();
     ~GuestAgent();
     GuestAgent(const GuestAgent&) = delete;
     GuestAgent& operator=(const GuestAgent&) = delete;
 
-    void Attach(VirtioSerial* serial) noexcept { serial_ = serial; }
+    // Before the VM starts.
+    void Attach(VirtioSerial* serial) noexcept;
 
-    // Device side (device lock held).
+    // Device side (serial port lock held).
     void OnBytes(std::span<const std::uint8_t> data);
     void OnOpen(bool open);
 
@@ -79,7 +81,7 @@ private:
     int WaitStatus(std::uint32_t id, std::chrono::milliseconds timeout);
     std::size_t Backlog() const;
 
-    DeviceLock& lock_;
+    DeviceLock* lock_ = nullptr; // The serial port's lock.
     VirtioSerial* serial_ = nullptr;
     std::vector<std::uint8_t> stream_;  // Partial chunk data (device lock).
     std::vector<std::uint8_t> message_; // Partial message (device lock).

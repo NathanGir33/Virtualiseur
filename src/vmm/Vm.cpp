@@ -237,12 +237,12 @@ void Vm::BuildDevices()
         pciFunctions_.push_back(std::move(net));
         GuestPort receive{
             [this](std::span<const std::uint8_t> frame) {
-                const DeviceGuard guard(deviceLock_);
-                if (virtioNet_ != nullptr) virtioNet_->Receive(frame);
+                const DeviceGuard guard(virtioNet_->Lock());
+                virtioNet_->Receive(frame);
             },
             [this] {
-                const DeviceGuard guard(deviceLock_);
-                if (virtioNet_ != nullptr) virtioNet_->FlushReceived();
+                const DeviceGuard guard(virtioNet_->Lock());
+                virtioNet_->FlushReceived();
             }};
         // A backend that cannot start leaves the card in place, cable unplugged.
         try {
@@ -273,14 +273,14 @@ void Vm::BuildDevices()
         virtioNet_->SetLinkUp(network_ != nullptr);
     }
     if (disk_ && config_.diskBus == DiskBus::Virtio) {
-        auto blk = std::make_unique<VirtioBlk>(*memory_, placement(kVirtioBlkSlot, kVirtioBlkGsi), deviceLock_, *disk_);
+        auto blk = std::make_unique<VirtioBlk>(*memory_, placement(kVirtioBlkSlot, kVirtioBlkGsi), *disk_);
         virtioBlk_ = blk.get();
         pciBus_->Add(kVirtioBlkSlot, 0, blk.get());
         pciFunctions_.push_back(std::move(blk));
     }
 
     if (config_.display == DisplayMode::Graphics && config_.virtioGpu && framebuffer_) {
-        auto gpu = std::make_unique<VirtioGpu>(*memory_, placement(kVirtioGpuSlot, kVirtioGpuGsi), deviceLock_,
+        auto gpu = std::make_unique<VirtioGpu>(*memory_, placement(kVirtioGpuSlot, kVirtioGpuGsi),
                                                framebuffer_->width, framebuffer_->height,
                                                framebuffer_->base, memory_->FramebufferBytes(), config_.gpu3d);
         virtioGpu_ = gpu.get();
@@ -296,7 +296,7 @@ void Vm::BuildDevices()
 
     if (config_.display != DisplayMode::None) {
         // spice-vdagent port: clipboard sharing and file transfer.
-        agent_ = std::make_unique<GuestAgent>(deviceLock_);
+        agent_ = std::make_unique<GuestAgent>();
         auto* agent = agent_.get();
         auto serial = std::make_unique<VirtioSerial>(
             *memory_, placement(kVirtioSerialSlot, kVirtioSerialGsi), GuestAgent::kPortName,
@@ -310,7 +310,7 @@ void Vm::BuildDevices()
     if (config_.audio) {
         try {
             auto sound = std::make_unique<VirtioSound>(*memory_, placement(kVirtioSoundSlot, kVirtioSoundGsi),
-                                                       deviceLock_, L"Virtualiseur — " + WidenUtf8(config_.name));
+                                                       L"Virtualiseur — " + WidenUtf8(config_.name));
             sound_ = sound.get();
             pciBus_->Add(kVirtioSoundSlot, 0, sound.get());
             pciFunctions_.push_back(std::move(sound));
@@ -554,35 +554,35 @@ bool Vm::GpuCursorSnapshot(GpuCursor& cursor)
 void Vm::RequestDisplaySize(std::uint32_t width, std::uint32_t height)
 {
     if (virtioGpu_ == nullptr) return;
-    const DeviceGuard guard(deviceLock_);
+    const DeviceGuard guard(virtioGpu_->Lock());
     virtioGpu_->RequestDisplaySize(width, height);
 }
 
 bool Vm::TabletReady() const
 {
     if (tablet_ == nullptr) return false;
-    const DeviceGuard guard(deviceLock_);
+    const DeviceGuard guard(tablet_->Lock());
     return tablet_->Ready();
 }
 
 void Vm::TabletMove(std::int32_t x, std::int32_t y)
 {
     if (tablet_ == nullptr) return;
-    const DeviceGuard guard(deviceLock_);
+    const DeviceGuard guard(tablet_->Lock());
     tablet_->Move(x, y);
 }
 
 void Vm::TabletButton(VirtioTablet::Button button, bool pressed)
 {
     if (tablet_ == nullptr) return;
-    const DeviceGuard guard(deviceLock_);
+    const DeviceGuard guard(tablet_->Lock());
     tablet_->SetButton(button, pressed);
 }
 
 void Vm::TabletWheel(std::int32_t steps, bool horizontal)
 {
     if (tablet_ == nullptr) return;
-    const DeviceGuard guard(deviceLock_);
+    const DeviceGuard guard(tablet_->Lock());
     tablet_->Wheel(steps, horizontal);
 }
 
@@ -616,19 +616,23 @@ std::string Vm::Statistics() const
 
 // --- Port and memory dispatch ----------------------------------------------------------
 
+// Each access takes only the lock of the device it reaches: a vCPU kicking
+// the disk does not wait for another one talking to the network card.
 std::uint32_t Vm::PortRead(std::uint16_t port, std::uint8_t size)
 {
-    const DeviceGuard guard(deviceLock_);
-    if (auto* device = ioBus_.Find(port)) return device->IoRead(port, size);
+    if (const auto* route = ioBus_.Find(port)) {
+        const DeviceGuard guard(route->lock != nullptr ? *route->lock : deviceLock_);
+        return route->device->IoRead(port, size);
+    }
     if (unhandledPorts_.fetch_add(1) < 32) VMM_DEBUG("Lecture du port non émulé 0x%04x (%u octets).", port, size);
     return 0xFFFFFFFFu;
 }
 
 void Vm::PortWrite(std::uint16_t port, std::uint8_t size, std::uint32_t value)
 {
-    const DeviceGuard guard(deviceLock_);
-    if (auto* device = ioBus_.Find(port)) {
-        device->IoWrite(port, size, value);
+    if (const auto* route = ioBus_.Find(port)) {
+        const DeviceGuard guard(route->lock != nullptr ? *route->lock : deviceLock_);
+        route->device->IoWrite(port, size, value);
         return;
     }
     if (unhandledPorts_.fetch_add(1) < 32) {
@@ -638,20 +642,19 @@ void Vm::PortWrite(std::uint16_t port, std::uint8_t size, std::uint32_t value)
 
 void Vm::MemoryAccess(std::uint64_t gpa, std::uint8_t* data, std::uint8_t size, bool write)
 {
-    // PCI BAR moves change the MMIO map: look it up under the lock.
-    std::unique_lock guard(deviceLock_);
-    if (auto* device = mmioBus_.Find(gpa)) {
+    MmioRoute route{};
+    if (mmioBus_.Find(gpa, route)) {
+        const DeviceGuard guard(route.lock != nullptr ? *route.lock : deviceLock_);
         if (write) {
             std::uint64_t value = 0;
             std::memcpy(&value, data, (std::min<std::size_t>)(size, 8));
-            device->MmioWrite(gpa, size, value);
+            route.device->MmioWrite(gpa, size, value);
         } else {
-            const auto value = device->MmioRead(gpa, size);
+            const auto value = route.device->MmioRead(gpa, size);
             std::memcpy(data, &value, (std::min<std::size_t>)(size, 8));
         }
         return;
     }
-    guard.unlock();
     if (auto* host = memory_->Pointer(gpa, size)) {
         if (write) std::memcpy(host, data, size);
         else std::memcpy(data, host, size);
@@ -746,11 +749,9 @@ void Vm::VcpuThread(std::uint32_t index)
                 ++mmioExits_;
                 HandleMmioExit(context, exit);
                 break;
-            case WHvRunVpExitReasonX64ApicEoi: {
-                const DeviceGuard guard(deviceLock_);
-                ioApic_->EndOfInterrupt(exit.ApicEoi.InterruptVector);
+            case WHvRunVpExitReasonX64ApicEoi:
+                ioApic_->EndOfInterrupt(exit.ApicEoi.InterruptVector); // Internally locked.
                 break;
-            }
             case WHvRunVpExitReasonX64Halt:
                 HandleHaltExit(index);
                 break;

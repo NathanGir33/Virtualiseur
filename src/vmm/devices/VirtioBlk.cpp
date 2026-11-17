@@ -23,9 +23,8 @@ constexpr std::uint8_t kStatusIoError = 1;
 constexpr std::uint8_t kStatusUnsupported = 2;
 } // namespace
 
-VirtioBlk::VirtioBlk(const GuestMemory& memory, const VirtioPlacement& placement, DeviceLock& lock,
-                     virtualiseur::whp::VirtualDisk& disk)
-    : VirtioModernDevice(2, 0x01, 0x00, memory, placement, 1), lock_(lock), disk_(disk)
+VirtioBlk::VirtioBlk(const GuestMemory& memory, const VirtioPlacement& placement, virtualiseur::whp::VirtualDisk& disk)
+    : VirtioModernDevice(2, 0x01, 0x00, memory, placement, 1), disk_(disk)
 {
     wake_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     worker_ = std::jthread([this](std::stop_token stop) { Worker(stop); });

@@ -122,7 +122,7 @@ void PciFunction::RemapBars()
                 bar.mapped = false;
             }
             if (shouldMap && !bar.mapped) {
-                ioBus_->Register(static_cast<std::uint16_t>(address), bar.size, bar.io);
+                ioBus_->Register(static_cast<std::uint16_t>(address), bar.size, bar.io, barLock_);
                 bar.mappedBase = address;
                 bar.mapped = true;
             }
@@ -137,7 +137,7 @@ void PciFunction::RemapBars()
                 MmioBarChanged(index, 0, false);
             }
             if (shouldMap && !bar.mapped) {
-                mmioBus_->Register(address, bar.size, bar.mmio);
+                mmioBus_->Register(address, bar.size, bar.mmio, barLock_);
                 bar.mappedBase = address;
                 bar.mapped = true;
                 MmioBarChanged(index, address, true);

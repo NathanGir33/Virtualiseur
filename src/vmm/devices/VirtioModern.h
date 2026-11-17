@@ -44,11 +44,18 @@ public:
     VirtioModernDevice(std::uint16_t virtioType, std::uint8_t classCode, std::uint8_t subclass,
                        const GuestMemory& memory, const VirtioPlacement& placement, std::size_t queueCount);
 
+    // BAR accesses arrive with Lock() held (the buses take it).
     std::uint32_t IoRead(std::uint16_t port, std::uint8_t size) override;
     void IoWrite(std::uint16_t port, std::uint8_t size, std::uint32_t value) override;
     std::uint64_t MmioRead(std::uint64_t address, std::uint8_t size) override;
     void MmioWrite(std::uint64_t address, std::uint8_t size, std::uint64_t value) override;
+    // PCI configuration space: called with the VM-wide lock, takes Lock().
+    std::uint32_t ConfigRead(std::uint32_t offset, std::uint8_t size) override;
     void ConfigWrite(std::uint32_t offset, std::uint8_t size, std::uint32_t value) override;
+
+    // This function's own lock: device state, rings and interrupts. Host
+    // threads (I/O workers, UI input, audio) take it before touching the device.
+    DeviceLock& Lock() const noexcept { return lock_; }
 
 protected:
     // Device features, without VIRTIO_F_VERSION_1 (always offered).
@@ -59,11 +66,12 @@ protected:
     virtual void DeviceReset() {}
     virtual void DriverOk() {}
 
-    // Must be called with the device lock held.
+    // Must be called with Lock() held.
     void SignalUsedBuffers(std::uint16_t queue);
     void SignalConfigChange();
     bool DriverReady() const noexcept { return (status_ & 0x04) != 0; }
 
+    mutable DeviceLock lock_;
     const GuestMemory& memory_;
     std::vector<VirtQueue> queues_;
     std::uint64_t driverFeatures_ = 0;

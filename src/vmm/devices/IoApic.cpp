@@ -11,6 +11,7 @@ IoApic::IoApic(virtualiseur::whp::Partition& partition, std::uint32_t id) : part
 
 std::uint64_t IoApic::MmioRead(std::uint64_t address, std::uint8_t size)
 {
+    const std::lock_guard guard(mutex_);
     const auto offset = address & 0xFF;
     std::uint32_t value = 0xFFFFFFFF;
     if (offset == 0x00) value = select_;
@@ -25,12 +26,15 @@ std::uint64_t IoApic::MmioRead(std::uint64_t address, std::uint8_t size)
 void IoApic::MmioWrite(std::uint64_t address, std::uint8_t size, std::uint64_t value)
 {
     const auto offset = address & 0xFF;
+    if (offset == 0x40) {
+        EndOfInterrupt(static_cast<std::uint32_t>(value & 0xFF)); // IOAPIC v0x20 EOI register.
+        return;
+    }
+    const std::lock_guard guard(mutex_);
     if (offset == 0x00) {
         select_ = static_cast<std::uint32_t>(value & 0xFF);
     } else if (offset == 0x10 && size >= 4) {
         WriteRegister(select_, static_cast<std::uint32_t>(value));
-    } else if (offset == 0x40) {
-        EndOfInterrupt(static_cast<std::uint32_t>(value & 0xFF)); // IOAPIC v0x20 EOI register.
     }
 }
 
@@ -72,6 +76,7 @@ void IoApic::WriteRegister(std::uint32_t index, std::uint32_t value)
 void IoApic::SetGsi(std::uint32_t gsi, bool asserted)
 {
     if (gsi >= kPins) return;
+    const std::lock_guard guard(mutex_);
     const bool previous = lines_[gsi];
     lines_[gsi] = asserted;
     const auto entry = redirection_[gsi];
@@ -134,6 +139,7 @@ void IoApic::Service(std::uint32_t pin)
 
 void IoApic::EndOfInterrupt(std::uint32_t vector)
 {
+    const std::lock_guard guard(mutex_);
     for (std::uint32_t pin = 0; pin < kPins; ++pin) {
         auto& entry = redirection_[pin];
         if (!LevelTriggered(entry) || !RemoteIrr(entry) || (entry & 0xFF) != vector) continue;

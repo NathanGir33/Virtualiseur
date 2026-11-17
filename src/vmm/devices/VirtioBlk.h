@@ -17,8 +17,7 @@ namespace vmm {
 // notification.
 class VirtioBlk final : public VirtioModernDevice {
 public:
-    VirtioBlk(const GuestMemory& memory, const VirtioPlacement& placement, DeviceLock& lock,
-              virtualiseur::whp::VirtualDisk& disk);
+    VirtioBlk(const GuestMemory& memory, const VirtioPlacement& placement, virtualiseur::whp::VirtualDisk& disk);
     ~VirtioBlk() override;
 
     std::uint64_t CompletedRequests() const noexcept { return completed_; }
@@ -33,7 +32,6 @@ private:
     void Worker(std::stop_token stop);
     std::uint8_t Execute(const VirtQueue::Element& element, std::uint32_t& written);
 
-    DeviceLock& lock_;
     virtualiseur::whp::VirtualDisk& disk_;
     std::mutex queueMutex_;
     std::vector<std::uint8_t> bounce_; // Worker-thread scratch buffer for one request.

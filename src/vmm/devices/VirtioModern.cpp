@@ -22,6 +22,7 @@ VirtioModernDevice::VirtioModernDevice(std::uint16_t virtioType, std::uint8_t cl
 {
     AttachIoBus(&placement.ioBus);
     AttachMmioBus(&placement.mmioBus);
+    SetBarLock(&lock_);
     SetSubsystem(0x1AF4, 0x1100);
     SetInterrupt(static_cast<std::uint8_t>(placement.gsi), 1);
     config_[0x04] |= 0x04; // Bus master, as left by the firmware.
@@ -264,8 +265,15 @@ void VirtioModernDevice::SendPendingVectors()
     }
 }
 
+std::uint32_t VirtioModernDevice::ConfigRead(std::uint32_t offset, std::uint8_t size)
+{
+    const DeviceGuard guard(lock_);
+    return PciFunction::ConfigRead(offset, size);
+}
+
 void VirtioModernDevice::ConfigWrite(std::uint32_t offset, std::uint8_t size, std::uint32_t value)
 {
+    const DeviceGuard guard(lock_);
     PciFunction::ConfigWrite(offset, size, value);
     // MSI-X enable / function mask, or INTx disable, may have changed.
     UpdateLine();
