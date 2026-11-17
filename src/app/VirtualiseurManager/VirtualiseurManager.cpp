@@ -16,6 +16,7 @@
 #include "Dialogs.h"
 #include "Ui.h"
 #include "VmLibrary.h"
+#include "DiskSnapshots.h"
 
 #include <algorithm>
 #include <array>
@@ -37,6 +38,7 @@ enum CommandId : int {
     IdStatusBar,
     IdNew,
     IdSettings,
+    IdSnapshots,
     IdDelete,
     IdStart,
     IdPause,
@@ -55,6 +57,7 @@ constexpr UINT_PTR kStatusTimer = 1;
 constexpr int kToolbarHeight = 74;
 constexpr int kListWidth = 290;
 constexpr UINT kOpenSettingsMessage = WM_APP + 1; // wParam: settings page.
+constexpr int kSnapshotsCard = 1000; // Card "page" that opens the snapshots window.
 
 HINSTANCE g_instance = nullptr;
 HWND g_window = nullptr;
@@ -146,6 +149,7 @@ void UpdateCommands()
     };
     enable(IdSettings, vm != nullptr && stopped);
     enable(IdDelete, vm != nullptr && stopped);
+    enable(IdSnapshots, vm != nullptr);
     enable(IdStart, vm != nullptr && stopped);
     enable(IdPause, live && (state == RunState::Running || state == RunState::Paused));
     enable(IdShutdown, live);
@@ -313,6 +317,17 @@ void OpenSettings(int page)
     if (ShowSettingsDialog(g_window, *vm, g_vms, config, page)) ApplySettings(*vm, config);
 }
 
+void OpenSnapshots()
+{
+    auto* vm = Selected();
+    if (vm == nullptr) return;
+    if (ShowSnapshotsDialog(g_window, *vm, vm->state == RunState::Stopped)) {
+        RefreshDiskInfo(*vm);
+        InvalidateRect(g_details, nullptr, FALSE);
+        SetStatus(L"Instantanés de « " + vm->config.name + L" » mis à jour.");
+    }
+}
+
 void DeleteVm()
 {
     auto* vm = Selected();
@@ -426,6 +441,7 @@ void ShowContextMenu(POINT screen)
         AppendMenuW(menu, MF_STRING | (live ? 0 : MF_GRAYED), IdPowerOff, L"É&teindre");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (stopped ? 0 : MF_GRAYED), IdSettings, L"&Configuration…");
+        AppendMenuW(menu, MF_STRING, IdSnapshots, L"&Instantanés…");
         AppendMenuW(menu, MF_STRING, IdOpenFolder, L"&Ouvrir le dossier");
         AppendMenuW(menu, MF_STRING | (PathExists(vm->directory / L"vmm.log") ? 0 : MF_GRAYED), IdShowLog, L"Afficher le &journal");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -535,6 +551,20 @@ std::vector<DetailCard> BuildCards(const VmEntry& vm)
     }
     if (shares.empty()) shares.push_back({L"Dossiers", L"Aucun", color::kSecondary});
     cards.push_back({ui::glyph::kFolder, L"Dossiers partagés", kPageShares, shares});
+    std::vector<DetailRow> snapshots;
+    try {
+        const virtualiseur::whp::SnapshotStore store(c.disk);
+        if (store.Snapshots().empty()) {
+            snapshots.push_back({L"Instantanés", L"Aucun", color::kSecondary});
+        } else {
+            snapshots.push_back({L"Instantanés", std::to_wstring(store.Snapshots().size())});
+            const auto* parent = store.Find(store.CurrentParent());
+            snapshots.push_back({L"État actuel", parent != nullptr ? L"Depuis « " + parent->name + L" »" : L"Indépendant"});
+        }
+    } catch (const std::exception&) {
+        snapshots.push_back({L"Instantanés", L"Métadonnées illisibles", color::kRed});
+    }
+    cards.push_back({ui::glyph::kCamera, L"Instantanés", kSnapshotsCard, snapshots});
     if (c.fullscreen) cards[2].rows.push_back({L"Démarrage", L"Plein écran"});
     if (!c.iso.empty()) {
         cards.push_back({ui::glyph::kInstall, L"Installation", kPageInstall,
@@ -855,7 +885,7 @@ void Layout()
     const int buttonWidth = Scale(84);
     const int buttonHeight = Scale(64);
     const int buttonTop = (toolbar - buttonHeight) / 2;
-    for (const int id : std::array<int, 8>{IdNew, IdSettings, IdDelete, 0, IdStart, IdPause, IdShutdown, IdPowerOff}) {
+    for (const int id : std::array<int, 9>{IdNew, IdSettings, IdSnapshots, IdDelete, 0, IdStart, IdPause, IdShutdown, IdPowerOff}) {
         if (id == 0) {
             x += Scale(17);
             continue;
@@ -930,6 +960,7 @@ void CreateControls(HWND window)
     AppendMenuW(machine, MF_STRING, IdPowerOff, L"É&teindre");
     AppendMenuW(machine, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(machine, MF_STRING, IdSettings, L"&Configuration…\tCtrl+S");
+    AppendMenuW(machine, MF_STRING, IdSnapshots, L"&Instantanés…");
     AppendMenuW(machine, MF_STRING, IdOpenFolder, L"&Ouvrir le dossier");
     AppendMenuW(machine, MF_STRING, IdShowLog, L"Afficher le &journal");
     AppendMenuW(machine, MF_SEPARATOR, 0, nullptr);
@@ -948,6 +979,7 @@ void CreateControls(HWND window)
     };
     addButton(IdNew, ui::glyph::kAdd, L"Nouvelle", color::kAccent);
     addButton(IdSettings, ui::glyph::kSettings, L"Configuration");
+    addButton(IdSnapshots, ui::glyph::kCamera, L"Instantanés");
     addButton(IdDelete, ui::glyph::kDelete, L"Supprimer");
     addButton(IdStart, ui::glyph::kPlay, L"Démarrer", color::kGreen);
     addButton(IdPause, ui::glyph::kPause, L"Pause");
@@ -969,6 +1001,7 @@ void OnCommand(int id)
     switch (id) {
     case IdNew: NewVm(); break;
     case IdSettings: OpenSettings(kPageGeneral); break;
+    case IdSnapshots: OpenSnapshots(); break;
     case IdDelete: DeleteVm(); break;
     case IDOK:
     case IdStart: StartVm(); break;
@@ -1095,7 +1128,8 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         }
         break;
     case kOpenSettingsMessage:
-        OpenSettings(static_cast<int>(wParam));
+        if (static_cast<int>(wParam) == kSnapshotsCard) OpenSnapshots();
+        else OpenSettings(static_cast<int>(wParam));
         return 0;
     case WM_COMMAND: {
         const int id = LOWORD(wParam);

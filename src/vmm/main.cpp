@@ -2,6 +2,7 @@
 
 #include "Vm.h"
 #include "devices/Virtio9p.h"
+#include "DiskSnapshots.h"
 #include "core/Log.h"
 #include "ui/DisplayWindow.h"
 
@@ -58,6 +59,11 @@ void PrintUsage()
         "  --nat-forward tcp|udp:<hôte>:<invité>  Redirection de port 127.0.0.1 -> invité (répétable)\n"
         "  --fullscreen              Ouvre la fenêtre en plein écran (Ctrl droit + F pour en sortir)\n"
         "  --audio on|off            Carte son virtio-sound vers la sortie audio de Windows (défaut on)\n"
+        "  --mic on|off              Micro de l'hôte enregistré par l'invité ; sinon il reçoit du silence (défaut off)\n"
+        "  --share <tag>=<dossier>[,ro]  Dossier Windows partagé en virtio-9p (3 au plus), monté sur /media/<tag>\n"
+        "                            par qemu-guest-agent\n"
+        "  --snapshot list|take <nom>|restore <n>|delete <n>\n"
+        "                            Instantanés du disque (--disk), machine éteinte ; ne démarre pas la VM\n"
         "  --hyperv on|off           Enlightenments Hyper-V : horloge TSC de référence, timers synthétiques (défaut on)\n"
         "  --gpu-share on|off        3D virgl : écran affiché depuis une texture Direct3D partagée, sans relecture (défaut on)\n"
         "  --preseed <fichier>       Installation Debian automatique (fichier preseed)\n"
@@ -77,6 +83,7 @@ struct Options {
     std::filesystem::path serialInput;
     std::filesystem::path log;
     bool verbose = false;
+    std::vector<std::string> snapshot; // --snapshot action [argument]: no VM is started.
 };
 
 std::uint64_t ParseNumber(const std::string& text, const char* what)
@@ -242,6 +249,11 @@ Options ParseOptions(const std::vector<std::string>& args)
             if (value == "on") options.vm.hyperv = true;
             else if (value == "off") options.vm.hyperv = false;
             else throw std::invalid_argument("--hyperv attend on ou off.");
+        } else if (option == "--snapshot") {
+            const auto action = next();
+            options.snapshot = {action};
+            if (action == "take" || action == "restore" || action == "delete") options.snapshot.push_back(next());
+            else if (action != "list") throw std::invalid_argument("--snapshot attend list, take <nom>, restore <n> ou delete <n>.");
         } else if (option == "--preseed") options.vm.preseed = Utf8Path(next());
         else if (option == "--rtc") options.vm.rtcLocalTime = next() == "local";
         else if (option == "--serial-log") options.serialLog = Utf8Path(next());
@@ -544,6 +556,37 @@ void ShowFatalError(const std::string& message, bool hasConsole)
 
 } // namespace
 
+// --snapshot: lists or changes the disk snapshots, then exits.
+int RunSnapshotCommand(const Options& options)
+{
+    try {
+        if (options.vm.disk.empty()) throw std::invalid_argument("--snapshot demande --disk <image de base>.");
+        virtualiseur::whp::SnapshotStore store(options.vm.disk);
+        const auto& action = options.snapshot[0];
+        if (action == "take") {
+            const auto id = store.Take(Widen(options.snapshot[1]), L"");
+            std::printf("instantane %u pris\n", id);
+        } else if (action == "restore") {
+            store.Restore(static_cast<std::uint32_t>(ParseNumber(options.snapshot[1], "--snapshot restore")));
+            std::printf("restaure\n");
+        } else if (action == "delete") {
+            store.Remove(static_cast<std::uint32_t>(ParseNumber(options.snapshot[1], "--snapshot delete")));
+            std::printf("supprime\n");
+        }
+        const auto current = store.CurrentParent();
+        for (const auto& snapshot : store.Snapshots()) {
+            std::printf("%u parent=%u couche=%s date=%s nom=%s\n", snapshot.id, snapshot.parent,
+                        PathUtf8(snapshot.layer).c_str(), Narrow(snapshot.date).c_str(), Narrow(snapshot.name).c_str());
+        }
+        std::printf("actuel parent=%u couche=%s couches=%llu octets\n", current, PathUtf8(store.CurrentLayer().filename()).c_str(),
+                    static_cast<unsigned long long>(store.LayerBytes()));
+        return 0;
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "Erreur : %s\n", error.what());
+        return 1;
+    }
+}
+
 int wmain(int argc, wchar_t** argv)
 {
     // Render the guest screen 1:1 in physical pixels instead of letting
@@ -565,6 +608,7 @@ int wmain(int argc, wchar_t** argv)
         ShowFatalError(error.what(), hasConsole);
         return 2;
     }
+    if (!options.snapshot.empty()) return RunSnapshotCommand(options);
     if (!options.log.empty()) Log::Open(options.log);
     Log::SetVerbose(options.verbose);
     SetUnhandledExceptionFilter(&CrashHandler);

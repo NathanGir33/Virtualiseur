@@ -42,6 +42,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalOptions>/permissive- /utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NOMINMAX;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\..\backend\whp;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -53,6 +54,8 @@
     <ClCompile Include="VmLibrary.cpp" />
     <ClCompile Include="Ui.cpp" />
     <ClCompile Include="Dialogs.cpp" />
+    <ClCompile Include="..\..\backend\whp\DiskLayer.cpp" />
+    <ClCompile Include="..\..\backend\whp\DiskSnapshots.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="VmLibrary.h" />

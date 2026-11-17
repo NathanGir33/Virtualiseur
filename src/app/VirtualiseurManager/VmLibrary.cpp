@@ -3,6 +3,8 @@
 
 #include "VmLibrary.h"
 
+#include "DiskSnapshots.h"
+
 #include <winioctl.h>
 
 #include <random>
@@ -324,6 +326,7 @@ void RefreshDiskInfo(VmEntry& entry)
     entry.diskExists = false;
     entry.diskBytes = 0;
     entry.diskAllocated = 0;
+    entry.snapshotCount = 0;
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (entry.config.disk.empty() ||
         !GetFileAttributesExW(entry.config.disk.c_str(), GetFileExInfoStandard, &data) ||
@@ -336,6 +339,14 @@ void RefreshDiskInfo(VmEntry& entry)
     const DWORD low = GetCompressedFileSizeW(entry.config.disk.c_str(), &high);
     if (low != INVALID_FILE_SIZE || GetLastError() == NO_ERROR) {
         entry.diskAllocated = (static_cast<std::uint64_t>(high) << 32) | low;
+    }
+    // Snapshots: the layer files count too.
+    entry.snapshotCount = 0;
+    try {
+        const virtualiseur::whp::SnapshotStore store(entry.config.disk);
+        entry.snapshotCount = store.Snapshots().size();
+        entry.diskAllocated += store.LayerBytes();
+    } catch (const std::exception&) {
     }
 }
 

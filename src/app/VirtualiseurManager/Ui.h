@@ -35,6 +35,7 @@ inline constexpr wchar_t kPause = 0xE769;
 inline constexpr wchar_t kPower = 0xE7E8;
 inline constexpr wchar_t kStop = 0xE71A;
 inline constexpr wchar_t kFolder = 0xE838;
+inline constexpr wchar_t kCamera = 0xE722;
 inline constexpr wchar_t kDocument = 0xE8A5;
 inline constexpr wchar_t kInfo = 0xE946;
 inline constexpr wchar_t kSystem = 0xE770;

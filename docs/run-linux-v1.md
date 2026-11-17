@@ -102,6 +102,10 @@ partage  /mnt/partage  9p  trans=virtio,version=9p2000.L,msize=524288,nofail  0 
 
 Un dossier ajouté pendant que la machine tourne n'apparaît qu'au démarrage suivant. La machine ne peut pas sortir du dossier choisi (même par une jonction NTFS). Fichiers en `rwxrwxrwx` ; `chmod` ne règle que la lecture seule. Liens symboliques, attributs étendus et verrous (`flock`) ne sont pas pris en charge ; les noms interdits par Windows (`a:b`, `NUL`...) sont refusés.
 
+## Instantanés
+
+Bouton **Instantanés** du gestionnaire (machine éteinte) : *Prendre* fige le disque, *Restaurer* le ramène à un instantané (les modifications faites depuis sont perdues), *Supprimer* retire un instantané sans changer l'état actuel ni les autres. Seul le disque est sauvegardé, pas la mémoire : restaurer revient à redémarrer la machine dans cet état. Les couches (`disk-<n>.layer`) et `disk.snapshots.ini` sont à côté de `disk.img` ; ne les déplace pas séparément. En ligne de commande : `VirtualiseurVM.exe --disk disk.img --snapshot list|take <nom>|restore <n>|delete <n>`.
+
 ## 7. Diagnostic
 
 Chaque VM écrit dans son dossier :

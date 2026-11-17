@@ -2,6 +2,8 @@
 
 #include "Ui.h"
 
+#include "DiskSnapshots.h"
+
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <ctime>
 #include <functional>
 #include <map>
 #include <memory>
@@ -23,6 +26,11 @@ namespace color = ui::color;
 
 enum ControlId : int {
     IdCategories = 100,
+    IdSnapshotList,
+    IdSnapshotDetail,
+    IdSnapshotName,
+    IdSnapshotRestore,
+    IdSnapshotDelete,
     IdPageTitle,
     IdMessage,
     IdName,
@@ -1700,6 +1708,216 @@ private:
 };
 
 } // namespace
+
+// --- Snapshots ---------------------------------------------------------------------------
+
+class SnapshotsDialog final : public Form {
+public:
+    SnapshotsDialog(const VmEntry& vm, bool stopped) : vm_(vm), stopped_(stopped) {}
+    bool Changed() const noexcept { return changed_; }
+
+private:
+    static constexpr int kWidth = 640;
+    static constexpr int kHeight = 540;
+    static constexpr int kLeft = 24;
+    static constexpr int kRight = kWidth - 24;
+
+    void Build() override
+    {
+        AddStatic(-1, L"Un instantané fige le disque de la machine (pas sa mémoire) ; restaurer y ramène le disque, "
+                      L"et la machine redémarre dans cet état. Supprimer un instantané ne change ni l'état actuel ni "
+                      L"les autres instantanés.",
+                  kLeft, 18, kRight - kLeft, 40, ui::Font().caption, color::kSecondary);
+        AddList(-1, IdSnapshotList, kLeft, 64, kRight - kLeft, 250);
+        AddStatic(-1, L"", kLeft, 322, kRight - kLeft, 40, ui::Font().caption, CLR_INVALID, SS_LEFT, IdSnapshotDetail);
+        AddLabel(-1, L"Nouvel instantané :", kLeft, 378, 150);
+        AddEdit(-1, IdSnapshotName, L"", kLeft + 150, 376, kRight - kLeft - 150 - 150);
+        SendMessageW(Item(IdSnapshotName), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Nom (ex. Avant mise à jour)"));
+        AddButton(-1, IDOK, L"Prendre", kRight - 140, 374, 140, 32, true);
+        AddButton(-1, IdSnapshotRestore, L"Restaurer", kLeft, 420, 140);
+        AddButton(-1, IdSnapshotDelete, L"Supprimer", kLeft + 150, 420, 140);
+        AddStatic(-1, L"", kLeft, kHeight - 84, kRight - kLeft, 34, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
+        AddButton(-1, IDCANCEL, L"Fermer", kRight - 100, kHeight - 46, 100, 32);
+        Reload(0);
+        if (!stopped_) SetMessage(L"La machine est allumée : éteins-la pour prendre, restaurer ou supprimer un instantané.", false);
+    }
+
+    void Focus() override { SetFocus(Item(IdSnapshotName)); }
+
+    // IDOK: take a snapshot (the window stays open).
+    bool Commit() override
+    {
+        auto name = TextOf(IdSnapshotName);
+        if (name.empty()) {
+            wchar_t date[32] = {};
+            const auto now = std::time(nullptr);
+            std::tm local{};
+            localtime_s(&local, &now);
+            wcsftime(date, 32, L"%d/%m/%Y %H:%M", &local);
+            name = L"Instantané du " + std::wstring(date);
+        }
+        Apply([&](virtualiseur::whp::SnapshotStore& store) {
+            const auto id = store.Take(name, L"");
+            SetText(IdSnapshotName, L"");
+            SetMessage(L"Instantané « " + name + L" » pris.", false);
+            return id;
+        });
+        return false;
+    }
+
+    void Command(int id, int code) override
+    {
+        if (id == IdSnapshotList && code == LBN_SELCHANGE) ShowSelection();
+        if (id == IdSnapshotRestore && code == BN_CLICKED) {
+            const auto* snapshot = SelectedSnapshot();
+            if (snapshot == nullptr) return;
+            const auto text = L"Restaurer « " + snapshot->name + L" » ?\n\nLe disque reviendra à son état du " + snapshot->date +
+                              L" : les modifications faites depuis le dernier instantané seront perdues.";
+            if (MessageBoxW(window_, text.c_str(), L"Restaurer un instantané", MB_OKCANCEL | MB_ICONWARNING) != IDOK) return;
+            const auto restored = snapshot->id;
+            const auto label = snapshot->name;
+            Apply([&](virtualiseur::whp::SnapshotStore& store) {
+                store.Restore(restored);
+                SetMessage(L"Disque ramené à « " + label + L" ».", false);
+                return 0u;
+            });
+        }
+        if (id == IdSnapshotDelete && code == BN_CLICKED) {
+            const auto* snapshot = SelectedSnapshot();
+            if (snapshot == nullptr) return;
+            const auto text = L"Supprimer l'instantané « " + snapshot->name +
+                              L" » ?\n\nOn ne pourra plus y revenir ; l'état actuel et les autres instantanés ne changent pas. "
+                              L"La fusion des couches peut prendre un moment.";
+            if (MessageBoxW(window_, text.c_str(), L"Supprimer un instantané", MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
+            const auto removed = snapshot->id;
+            const auto label = snapshot->name;
+            Apply([&](virtualiseur::whp::SnapshotStore& store) {
+                store.Remove(removed);
+                SetMessage(L"Instantané « " + label + L" » supprimé.", false);
+                return 0u;
+            });
+        }
+    }
+
+    template <typename Action>
+    void Apply(Action action)
+    {
+        if (!stopped_) {
+            SetMessage(L"Éteins la machine d'abord.");
+            return;
+        }
+        try {
+            virtualiseur::whp::SnapshotStore store(vm_.config.disk);
+            SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+            const auto select = action(store);
+            changed_ = true;
+            Reload(select);
+        } catch (const std::exception& error) {
+            const std::string text = error.what();
+            std::wstring wide(text.size(), L'\0');
+            wide.resize(static_cast<std::size_t>(MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+                                                                     wide.data(), static_cast<int>(wide.size()))));
+            Reload(0);
+            SetMessage(wide);
+            MessageBeep(MB_ICONWARNING);
+        }
+    }
+
+    // Tree order: each snapshot under the one it derives from; "État actuel"
+    // under the snapshot the current disk comes from.
+    void Reload(std::uint32_t select)
+    {
+        rows_.clear();
+        snapshots_.clear();
+        std::uint32_t current = 0;
+        try {
+            const virtualiseur::whp::SnapshotStore store(vm_.config.disk);
+            snapshots_ = store.Snapshots();
+            current = store.CurrentParent();
+        } catch (const std::exception&) {
+        }
+        const std::function<void(std::uint32_t, int)> add = [&](std::uint32_t parent, int depth) {
+            for (const auto& snapshot : snapshots_) {
+                if (snapshot.parent != parent) continue;
+                rows_.push_back({snapshot.id, depth});
+                add(snapshot.id, depth + 1);
+            }
+            if (parent == current) rows_.push_back({0, depth});
+        };
+        add(0, 0);
+        HWND list = Item(IdSnapshotList);
+        SendMessageW(list, LB_RESETCONTENT, 0, 0);
+        int selected = -1;
+        for (std::size_t index = 0; index < rows_.size(); ++index) {
+            const auto& row = rows_[index];
+            std::wstring text(static_cast<std::size_t>(row.depth) * 6, L' ');
+            if (row.id == 0) {
+                text += L"▶  État actuel";
+            } else {
+                const auto* snapshot = FindSnapshot(row.id);
+                text += L"●  " + snapshot->name + L"   —   " + snapshot->date;
+            }
+            SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+            if (row.id == select) selected = static_cast<int>(index);
+        }
+        if (selected < 0) {
+            for (std::size_t index = 0; index < rows_.size(); ++index) {
+                if (rows_[index].id == 0) selected = static_cast<int>(index);
+            }
+        }
+        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(selected), 0);
+        ShowSelection();
+    }
+
+    void ShowSelection()
+    {
+        const auto* snapshot = SelectedSnapshot();
+        std::wstring detail;
+        if (snapshot != nullptr) {
+            detail = L"« " + snapshot->name + L" », pris le " + snapshot->date + L".";
+        } else if (snapshots_.empty()) {
+            detail = L"Aucun instantané pour l'instant : « Prendre » fige l'état actuel du disque.";
+        } else {
+            detail = L"État actuel : ce que la machine utilise, construit sur l'instantané au-dessus.";
+        }
+        SetText(IdSnapshotDetail, detail);
+        EnableWindow(Item(IdSnapshotRestore), stopped_ && snapshot != nullptr);
+        EnableWindow(Item(IdSnapshotDelete), stopped_ && snapshot != nullptr);
+        EnableWindow(Item(IDOK), stopped_);
+    }
+
+    const virtualiseur::whp::SnapshotStore::Snapshot* FindSnapshot(std::uint32_t id) const
+    {
+        for (const auto& snapshot : snapshots_) {
+            if (snapshot.id == id) return &snapshot;
+        }
+        return nullptr;
+    }
+
+    const virtualiseur::whp::SnapshotStore::Snapshot* SelectedSnapshot() const
+    {
+        const auto index = static_cast<int>(SendMessageW(Item(IdSnapshotList), LB_GETCURSEL, 0, 0));
+        if (index < 0 || index >= static_cast<int>(rows_.size())) return nullptr;
+        return rows_[static_cast<std::size_t>(index)].id == 0 ? nullptr : FindSnapshot(rows_[static_cast<std::size_t>(index)].id);
+    }
+
+    struct Row {
+        std::uint32_t id = 0; // 0: the current state.
+        int depth = 0;
+    };
+    const VmEntry& vm_;
+    bool stopped_ = true;
+    bool changed_ = false;
+    std::vector<virtualiseur::whp::SnapshotStore::Snapshot> snapshots_;
+    std::vector<Row> rows_;
+};
+
+bool ShowSnapshotsDialog(HWND owner, const VmEntry& vm, bool stopped)
+{
+    SnapshotsDialog dialog(vm, stopped);
+    dialog.Run(owner, vm.config.name + L" — Instantanés", 640, 540);
+    return dialog.Changed();
+}
 
 bool ShowSettingsDialog(HWND owner, const VmEntry& vm, const std::vector<VmEntry>& library, VmConfig& config,
                         int startPage)

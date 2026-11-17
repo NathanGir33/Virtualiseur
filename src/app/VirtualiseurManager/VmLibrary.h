@@ -85,6 +85,7 @@ struct VmEntry {
     bool diskExists = false;
     std::uint64_t diskBytes = 0;
     std::uint64_t diskAllocated = 0;
+    std::size_t snapshotCount = 0;
 };
 
 struct HostInfo {

@@ -32,4 +32,8 @@ struct NewVmRequest {
 // "New virtual machine" window: name, ISO, hardware sliders and options.
 bool ShowNewVmDialog(HWND owner, const fs::path& library, const std::vector<VmEntry>& existing, NewVmRequest& request);
 
+// Disk snapshots of a machine: take (stopped), restore, delete. Returns true if
+// something changed.
+bool ShowSnapshotsDialog(HWND owner, const VmEntry& vm, bool stopped);
+
 } // namespace manager

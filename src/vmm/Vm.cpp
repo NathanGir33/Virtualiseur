@@ -12,6 +12,7 @@
 #include "devices/VirtioNet.h"
 #include "devices/VirtioSound.h"
 #include "devices/Virtio9p.h"
+#include "DiskSnapshots.h"
 #include "firmware/AcpiTables.h"
 #include "net/BridgeNetworkBackend.h"
 #include "net/InternalNetworkBackend.h"
@@ -157,7 +158,13 @@ Vm::Vm(const VmConfig& config, SerialOutput serialOutput)
 
     if (!config_.disk.empty()) {
         if (std::filesystem::exists(config_.disk)) {
-            disk_.emplace(virtualiseur::whp::VirtualDisk::Open(config_.disk));
+            // With snapshots, the VM writes to the current layer over the base image.
+            const auto current = virtualiseur::whp::SnapshotStore::CurrentDisk(config_.disk);
+            disk_.emplace(virtualiseur::whp::VirtualDisk::Open(current));
+            if (disk_->LayerCount() != 0) {
+                VMM_INFO("Disque : couche active %s, %zu couche(s) au-dessus de %s.", PathUtf8(current.filename()).c_str(),
+                         disk_->LayerCount(), PathUtf8(config_.disk.filename()).c_str());
+            }
         } else {
             if (config_.diskSizeMiB == 0) throw std::runtime_error("Le disque n'existe pas et aucune taille n'est indiquée.");
             disk_.emplace(virtualiseur::whp::VirtualDisk::CreateSparse(config_.disk, config_.diskSizeMiB * 1024 * 1024));

@@ -1,6 +1,7 @@
 #include "VirtualDisk.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
@@ -85,6 +86,31 @@ VirtualDisk VirtualDisk::CreateSparse(
 
 VirtualDisk VirtualDisk::Open(const std::filesystem::path& path, bool readOnly)
 {
+    if (LayerFile::IsLayer(path)) {
+        // Walk the chain down to the raw base; only the top layer is writable.
+        std::vector<LayerFile> layers;
+        auto current = path;
+        while (LayerFile::IsLayer(current)) {
+            if (layers.size() >= 4096) throw std::runtime_error("Chaîne de couches de disque trop longue (boucle ?).");
+            layers.push_back(LayerFile::Open(current, layers.empty() && !readOnly));
+            if (layers.back().VirtualSize() != layers.front().VirtualSize()) {
+                throw std::runtime_error("Couches de disque de tailles différentes : " + current.string());
+            }
+            current = current.parent_path() / layers.back().ParentName();
+        }
+        HANDLE base = CreateFileW(current.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
+        if (base == INVALID_HANDLE_VALUE) ThrowLastError("CreateFileW(base du disque)");
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(base, &size) || static_cast<std::uint64_t>(size.QuadPart) < layers.front().VirtualSize()) {
+            CloseHandle(base);
+            throw std::runtime_error("Image de base plus petite que ses couches : " + current.string());
+        }
+        VirtualDisk disk(base, path, layers.front().VirtualSize(), readOnly);
+        disk.layers_ = std::move(layers);
+        return disk;
+    }
+
     HANDLE file = CreateFileW(
         path.c_str(),
         readOnly ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE,
@@ -122,7 +148,8 @@ VirtualDisk::VirtualDisk(VirtualDisk&& other) noexcept
     : file_(std::exchange(other.file_, INVALID_HANDLE_VALUE)),
       path_(std::move(other.path_)),
       sizeBytes_(std::exchange(other.sizeBytes_, 0)),
-      readOnly_(std::exchange(other.readOnly_, false))
+      readOnly_(std::exchange(other.readOnly_, false)),
+      layers_(std::move(other.layers_))
 {
 }
 
@@ -134,6 +161,7 @@ VirtualDisk& VirtualDisk::operator=(VirtualDisk&& other) noexcept
         path_ = std::move(other.path_);
         sizeBytes_ = std::exchange(other.sizeBytes_, 0);
         readOnly_ = std::exchange(other.readOnly_, false);
+        layers_ = std::move(other.layers_);
     }
     return *this;
 }
@@ -153,6 +181,22 @@ void VirtualDisk::ReadSectors(std::uint64_t lba, std::span<std::byte> destinatio
         throw std::out_of_range("Lecture au-dela de la capacite du disque virtuel.");
     }
     if (destination.empty()) return;
+
+    if (!layers_.empty()) {
+        // Block by block, each from the topmost layer that has it.
+        const std::lock_guard lock(ioMutex_);
+        std::uint64_t offset = lba * SectorSize;
+        std::size_t done = 0;
+        while (done < destination.size()) {
+            const auto block = offset / LayerFile::kBlockSize;
+            const auto inner = static_cast<std::uint32_t>(offset % LayerFile::kBlockSize);
+            const auto count = (std::min<std::size_t>)(destination.size() - done, LayerFile::kBlockSize - inner);
+            ReadFromChain(0, block, inner, destination.subspan(done, count));
+            done += count;
+            offset += count;
+        }
+        return;
+    }
 
     // Positional I/O through OVERLAPPED offsets: concurrent requests from
     // several device threads do not share a file pointer.
@@ -190,6 +234,35 @@ void VirtualDisk::WriteSectors(std::uint64_t lba, std::span<const std::byte> sou
     }
     if (source.empty()) return;
 
+    if (!layers_.empty()) {
+        const std::lock_guard lock(ioMutex_);
+        auto& top = layers_.front();
+        std::vector<std::byte> whole;
+        std::uint64_t offset = lba * SectorSize;
+        std::size_t done = 0;
+        while (done < source.size()) {
+            const auto block = offset / LayerFile::kBlockSize;
+            const auto inner = static_cast<std::uint32_t>(offset % LayerFile::kBlockSize);
+            const auto count = (std::min<std::size_t>)(source.size() - done, LayerFile::kBlockSize - inner);
+            const auto part = source.subspan(done, count);
+            if (top.Has(block)) {
+                top.Write(block, inner, part);
+            } else if (count == LayerFile::kBlockSize) {
+                top.Append(block, part);
+            } else {
+                // First partial write to this block: read the whole 64 KiB from
+                // the layers below, apply the change in memory, write it all.
+                whole.resize(LayerFile::kBlockSize);
+                ReadFromChain(1, block, 0, whole);
+                std::memcpy(whole.data() + inner, part.data(), count);
+                top.Append(block, whole);
+            }
+            done += count;
+            offset += count;
+        }
+        return;
+    }
+
     std::size_t completed = 0;
     while (completed < source.size()) {
         const auto chunk = static_cast<DWORD>((std::min)(
@@ -213,13 +286,32 @@ void VirtualDisk::WriteSectors(std::uint64_t lba, std::span<const std::byte> sou
 void VirtualDisk::Flush()
 {
     if (readOnly_) return;
+    if (!layers_.empty()) {
+        const std::lock_guard lock(ioMutex_);
+        layers_.front().Flush();
+        return;
+    }
     if (!FlushFileBuffers(file_)) {
         ThrowLastError("FlushFileBuffers");
     }
 }
 
+void VirtualDisk::ReadFromChain(std::size_t fromLayer, std::uint64_t block, std::uint32_t offset,
+                                std::span<std::byte> destination) const
+{
+    for (auto index = fromLayer; index < layers_.size(); ++index) {
+        if (layers_[index].Has(block)) {
+            layers_[index].Read(block, offset, destination);
+            return;
+        }
+    }
+    // The raw base has every block (holes of the sparse file read as zeros).
+    ReadAt(file_, block * LayerFile::kBlockSize + offset, destination.data(), destination.size());
+}
+
 void VirtualDisk::Close() noexcept
 {
+    layers_.clear();
     if (file_ != INVALID_HANDLE_VALUE) {
         CloseHandle(file_);
         file_ = INVALID_HANDLE_VALUE;
