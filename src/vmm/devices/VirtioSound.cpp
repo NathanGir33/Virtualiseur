@@ -156,6 +156,7 @@ void VirtioSound::ProcessControl()
 std::uint32_t VirtioSound::HandleControl(const std::vector<std::uint8_t>& request, std::vector<std::uint8_t>& payload)
 {
     const auto code = Load32(request, 0);
+    VMM_DEBUG("virtio-snd : requête 0x%x (%zu octets en attente).", code, pendingBytes_);
     switch (code) {
     case kPcmInfo: {
         // virtio_snd_query_info: hdr, start_id, count, size.
@@ -206,7 +207,10 @@ std::uint32_t VirtioSound::HandleControl(const std::vector<std::uint8_t>& reques
     }
     case kPcmPrepare:
         if (request.size() < 8 || Load32(request, 4) >= kStreamCount) return kStatusBadMessage;
-        return params_.set ? kStatusOk : kStatusBadMessage;
+        if (!params_.set) return kStatusBadMessage;
+        // Open the host device now: START must play at once (see WasapiOutput::Prepare).
+        if (output_) output_->Prepare(kRates[params_.rate], params_.channels);
+        return kStatusOk;
     case kPcmStart: {
         if (request.size() < 8 || Load32(request, 4) >= kStreamCount || !params_.set) return kStatusBadMessage;
         running_ = true;

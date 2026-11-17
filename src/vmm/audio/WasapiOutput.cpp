@@ -31,6 +31,11 @@ constexpr PROPERTYKEY kDeviceFriendlyName{
 // Device buffer: large enough to ride out scheduling hiccups, small enough
 // to keep the guest's audio in sync with its video.
 constexpr REFERENCE_TIME kBufferDuration = 60 * 10'000; // 60 ms, in 100 ns units.
+// How far ahead of the speaker the guest's samples are taken. A real DAC
+// reads at the playback rate; taking the whole 60 ms at once, PipeWire's
+// small ALSA buffers (~50 ms) were emptied the moment playback started and
+// the guest saw an underrun right away, then again after every restart.
+constexpr std::uint32_t kLeadMilliseconds = 30;
 
 std::string Narrow(const std::wstring& text)
 {
@@ -84,6 +89,18 @@ WasapiOutput::~WasapiOutput()
     CloseHandle(wake_);
 }
 
+void WasapiOutput::Prepare(std::uint32_t rate, std::uint16_t channels)
+{
+    {
+        const std::lock_guard lock(mutex_);
+        if (request_.active || (request_.rate == rate && request_.channels == channels)) return;
+        request_.rate = rate;
+        request_.channels = channels;
+        ++request_.serial;
+    }
+    SetEvent(wake_);
+}
+
 void WasapiOutput::Play(std::uint32_t rate, std::uint16_t channels)
 {
     {
@@ -120,6 +137,8 @@ void WasapiOutput::Thread(std::stop_token stop)
         VMM_WARN("Son : MMDeviceEnumerator indisponible, le son de la VM sera ignoré.");
     }
 
+    // Device state. Owned by the device worker while it runs, by this thread
+    // otherwise.
     ComPtr<IAudioClient> client;
     ComPtr<IAudioRenderClient> render;
     std::wstring deviceId;
@@ -127,12 +146,28 @@ void WasapiOutput::Thread(std::stop_token stop)
     bool started = false;
     std::uint32_t rate = 0;
     std::uint16_t channels = 0;
+
     ULONGLONG retryAt = 0;
     ULONGLONG nextDeviceCheck = 0;
     bool warned = false;
     std::vector<std::uint8_t> scratch;
     double nullFrames = 0.0;
     auto nullClock = std::chrono::steady_clock::now();
+
+    // Consumes the guest's samples at the stream rate and discards them: the
+    // guest keeps its real-time clock while no host device plays.
+    const auto consumeAtStreamRate = [&] {
+        const auto current = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(current - nullClock).count();
+        nullClock = current;
+        nullFrames += (std::min)(seconds, 0.2) * rate;
+        const auto frames = static_cast<std::size_t>(nullFrames);
+        nullFrames -= static_cast<double>(frames);
+        if (frames != 0) {
+            scratch.resize(frames * channels * 2u);
+            playedBytes_ += pull_(scratch.data(), scratch.size());
+        }
+    };
 
     const auto closeClient = [&] {
         if (client && started) client->Stop();
@@ -143,6 +178,7 @@ void WasapiOutput::Thread(std::stop_token stop)
     };
 
     const auto openClient = [&]() -> bool {
+        const auto openStart = GetTickCount64();
         ComPtr<IMMDevice> device;
         if (!enumerator || FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device))) return false;
         ComPtr<IAudioClient> audio;
@@ -175,18 +211,58 @@ void WasapiOutput::Thread(std::stop_token stop)
             (void)session->SetDisplayName(sessionName_.c_str(), nullptr); // Name in the Windows volume mixer.
         }
         deviceId = DeviceId(device.Get());
-        VMM_INFO("Son : sortie sur « %s » (%u Hz, %u %s, tampon %u ms).", Narrow(FriendlyName(device.Get())).c_str(),
-                 rate, channels, channels > 1 ? "canaux" : "canal", bufferFrames * 1000 / (std::max)(rate, 1u));
+        VMM_INFO("Son : sortie sur « %s » (%u Hz, %u %s, tampon %u ms, ouverte en %llu ms).",
+                 Narrow(FriendlyName(device.Get())).c_str(), rate, channels, channels > 1 ? "canaux" : "canal",
+                 bufferFrames * 1000 / (std::max)(rate, 1u), GetTickCount64() - openStart);
         client = std::move(audio);
         render = std::move(renderClient);
         return true;
+    };
+
+    // Opening (IAudioClient::Initialize) and starting (IAudioClient::Start)
+    // block for up to ~1 s when Windows has powered the output down, after
+    // some 10-30 s of silence. ALSA in the guest gives up after buffer time
+    // x 1.1 without progress (~350 ms for aplay, less for PipeWire), so this
+    // work runs on a helper thread while this one keeps consuming the guest's
+    // samples at the stream rate: at worst the start of a sound is lost,
+    // never the stream.
+    // Releasing a client can block as long, so the worker also closes the
+    // previous one (format or default device changed).
+    std::thread worker;
+    std::atomic_bool workerDone = false;
+    bool workerFailed = false;
+    bool needReopen = false;
+    const auto launchWorker = [&](bool start, bool reopen) {
+        workerDone = false;
+        workerFailed = false;
+        worker = std::thread([&, start, reopen] {
+            const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            if (reopen) closeClient();
+            bool ok = client || openClient();
+            if (ok && start && !started) {
+                const auto before = GetTickCount64();
+                const HRESULT result = client->Start();
+                started = SUCCEEDED(result);
+                VMM_DEBUG("Son : Start() en %llu ms (0x%08lx).", GetTickCount64() - before,
+                          static_cast<unsigned long>(result));
+                ok = started;
+            }
+            if (!ok) {
+                closeClient();
+                workerFailed = true;
+            }
+            if (SUCCEEDED(apartment)) CoUninitialize();
+            workerDone = true;
+            SetEvent(wake_);
+        });
     };
 
     const auto fill = [&]() -> HRESULT {
         UINT32 padding = 0;
         HRESULT result = client->GetCurrentPadding(&padding);
         if (FAILED(result)) return result;
-        const UINT32 available = bufferFrames > padding ? bufferFrames - padding : 0;
+        const UINT32 lead = (std::min)(bufferFrames, rate * kLeadMilliseconds / 1000);
+        const UINT32 available = lead > padding ? lead - padding : 0;
         if (available == 0) return S_OK;
         BYTE* data = nullptr;
         result = render->GetBuffer(available, &data);
@@ -206,81 +282,91 @@ void WasapiOutput::Thread(std::stop_token stop)
             const std::lock_guard lock(mutex_);
             request = request_;
         }
+        const ULONGLONG now = GetTickCount64();
+
+        if (worker.joinable()) {
+            if (!workerDone.load()) {
+                // The device is being opened or woken up.
+                if (request.active) consumeAtStreamRate();
+                WaitForSingleObject(wake_, 10);
+                continue;
+            }
+            worker.join();
+            if (workerFailed) {
+                retryAt = now + 3000;
+                if (!warned) {
+                    VMM_WARN("Son : aucune sortie audio Windows utilisable ; le son de la VM est ignoré.");
+                    warned = true;
+                }
+            } else {
+                warned = false;
+                nextDeviceCheck = now + 2000;
+            }
+        }
+
         if (!request.active) {
             if (started) {
                 client->Stop();
                 client->Reset(); // Drop what is still buffered: pause is immediate.
                 started = false;
             }
-            WaitForSingleObject(wake_, INFINITE);
+            // Keep a client open for the prepared format, so START plays at once.
+            if ((!client || needReopen || request.rate != rate || request.channels != channels) && now >= retryAt) {
+                rate = request.rate;
+                channels = request.channels;
+                launchWorker(false, true);
+                needReopen = false;
+                continue;
+            }
+            WaitForSingleObject(wake_, client ? INFINITE : 3000);
             continue;
         }
-        const ULONGLONG now = GetTickCount64();
+
         if (request.serial != seenSerial) {
             seenSerial = request.serial;
-            if (client && (request.rate != rate || request.channels != channels)) closeClient();
+            if (client && (request.rate != rate || request.channels != channels)) needReopen = true;
             rate = request.rate;
             channels = request.channels;
             nullFrames = 0.0;
             nullClock = std::chrono::steady_clock::now();
         }
-        if (client && now >= nextDeviceCheck) {
+        if (client && !needReopen && now >= nextDeviceCheck) {
             // Follow the default device (headphones plugged, output changed).
             nextDeviceCheck = now + 2000;
             ComPtr<IMMDevice> current;
             if (enumerator && SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &current)) &&
                 DeviceId(current.Get()) != deviceId) {
                 VMM_INFO("Son : le périphérique de sortie par défaut de Windows a changé.");
-                closeClient();
+                needReopen = true;
                 retryAt = 0;
             }
         }
-        if (!client && now >= retryAt) {
-            if (openClient()) {
-                warned = false;
-                nextDeviceCheck = now + 2000;
-            } else {
-                closeClient();
-                retryAt = now + 3000;
-                if (!warned) {
-                    VMM_WARN("Son : aucune sortie audio Windows utilisable ; le son de la VM est ignoré.");
-                    warned = true;
-                }
-            }
-        }
-
-        if (client) {
-            HRESULT result = fill();
-            if (SUCCEEDED(result) && !started) {
-                result = client->Start();
-                started = SUCCEEDED(result);
-            }
-            if (FAILED(result)) {
-                VMM_WARN("Son : flux WASAPI interrompu (0x%08lx), reconnexion.", static_cast<unsigned long>(result));
-                closeClient();
-                retryAt = now + 500;
-                continue;
-            }
-            const HANDLE handles[2] = {bufferEvent, wake_};
-            WaitForMultipleObjects(2, handles, FALSE, 100);
+        if ((!client || !started || needReopen) && now >= retryAt) {
+            launchWorker(true, needReopen);
+            needReopen = false;
             nullClock = std::chrono::steady_clock::now();
             continue;
         }
-
-        // No host device: consume the guest's samples at the stream rate.
-        const auto current = std::chrono::steady_clock::now();
-        const double seconds = std::chrono::duration<double>(current - nullClock).count();
-        nullClock = current;
-        nullFrames += (std::min)(seconds, 0.2) * rate;
-        const auto frames = static_cast<std::size_t>(nullFrames);
-        nullFrames -= static_cast<double>(frames);
-        if (frames != 0) {
-            scratch.resize(frames * channels * 2u);
-            playedBytes_ += pull_(scratch.data(), scratch.size());
+        if (!client || !started || needReopen) {
+            // No host device for now: keep the guest's clock running.
+            consumeAtStreamRate();
+            WaitForSingleObject(wake_, 10);
+            continue;
         }
-        WaitForSingleObject(wake_, 10);
+
+        const HRESULT result = fill();
+        if (FAILED(result)) {
+            VMM_WARN("Son : flux WASAPI interrompu (0x%08lx), reconnexion.", static_cast<unsigned long>(result));
+            closeClient();
+            retryAt = now + 500;
+            continue;
+        }
+        const HANDLE handles[2] = {bufferEvent, wake_};
+        WaitForMultipleObjects(2, handles, FALSE, 100);
+        nullClock = std::chrono::steady_clock::now();
     }
 
+    if (worker.joinable()) worker.join();
     closeClient();
     enumerator.Reset();
     if (bufferEvent != nullptr) CloseHandle(bufferEvent);

@@ -30,6 +30,12 @@ public:
     WasapiOutput(const WasapiOutput&) = delete;
     WasapiOutput& operator=(const WasapiOutput&) = delete;
 
+    // Any thread: opens the device for this format without playing yet.
+    // Opening a WASAPI client takes up to ~1 s; done at START, it outlasts
+    // ALSA's wait for the first period (buffer time x 1.1) and the guest gives
+    // up with an I/O error. The output also opens 48 kHz stereo on its own at
+    // creation.
+    void Prepare(std::uint32_t rate, std::uint16_t channels);
     // Any thread: starts (or reconfigures) playback of interleaved S16 PCM.
     void Play(std::uint32_t rate, std::uint16_t channels);
     // Any thread: stops playback and drops what the host device still holds.
