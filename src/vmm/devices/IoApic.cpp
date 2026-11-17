@@ -85,6 +85,39 @@ void IoApic::SetGsi(std::uint32_t gsi, bool asserted)
     }
 }
 
+void IoApic::SignalMsi(std::uint64_t address, std::uint32_t data)
+{
+    // Intel SDM 10.11: address 0xFEExxxxx with the destination in bits 19:12
+    // and the destination mode in bit 2; data holds the vector and the
+    // delivery mode. MSIs are edge-triggered: no Remote IRR, no EOI exit.
+    if ((address >> 20) != 0xFEE) {
+        VMM_WARN("MSI: adresse 0x%llx hors de la fenêtre APIC, ignorée.", static_cast<unsigned long long>(address));
+        return;
+    }
+    const auto vector = data & 0xFF;
+    WHV_INTERRUPT_CONTROL control{};
+    switch ((data >> 8) & 0x07) {
+    case 0: control.Type = WHvX64InterruptTypeFixed; break;
+    case 1: control.Type = WHvX64InterruptTypeLowestPriority; break;
+    case 4: control.Type = WHvX64InterruptTypeNmi; break;
+    default:
+        VMM_WARN("MSI: mode de remise %u non pris en charge.", (data >> 8) & 0x07);
+        return;
+    }
+    if (control.Type != WHvX64InterruptTypeNmi && vector < 0x10) return;
+    control.DestinationMode = (address & 0x4) != 0
+        ? WHvX64InterruptDestinationModeLogical : WHvX64InterruptDestinationModePhysical;
+    control.TriggerMode = WHvX64InterruptTriggerModeEdge;
+    control.Destination = static_cast<std::uint32_t>((address >> 12) & 0xFF);
+    control.Vector = vector;
+    try {
+        partition_.RequestInterrupt(control);
+        ++msiDelivered_;
+    } catch (const std::exception& error) {
+        VMM_ERROR("MSI: injection du vecteur 0x%x impossible: %s", vector, error.what());
+    }
+}
+
 void IoApic::Service(std::uint32_t pin)
 {
     auto& entry = redirection_[pin];

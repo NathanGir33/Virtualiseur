@@ -49,8 +49,8 @@ struct GpuCursor {
 // fenced commands complete when the host GPU has finished them.
 class VirtioGpu final : public VirtioModernDevice {
 public:
-    VirtioGpu(const GuestMemory& memory, InterruptSink& sink, DeviceLock& lock, IoBus& ioBus, std::uint16_t ioBase,
-              std::uint32_t gsi, std::uint32_t width, std::uint32_t height, std::uint64_t framebufferBase,
+    VirtioGpu(const GuestMemory& memory, const VirtioPlacement& placement, DeviceLock& lock,
+              std::uint32_t width, std::uint32_t height, std::uint64_t framebufferBase,
               std::uint64_t framebufferBytes, bool enable3d);
     ~VirtioGpu() override;
 

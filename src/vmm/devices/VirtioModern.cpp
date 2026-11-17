@@ -9,27 +9,46 @@ constexpr std::uint8_t kCapCommon = 1;
 constexpr std::uint8_t kCapNotify = 2;
 constexpr std::uint8_t kCapIsr = 3;
 constexpr std::uint8_t kCapDevice = 4;
+
+constexpr std::uint16_t kCommandIntxDisable = 0x0400;
 } // namespace
 
 VirtioModernDevice::VirtioModernDevice(std::uint16_t virtioType, std::uint8_t classCode, std::uint8_t subclass,
-                                       const GuestMemory& memory, InterruptSink& sink, std::uint32_t gsi,
-                                       IoBus& ioBus, std::uint16_t ioBase, std::size_t queueCount)
+                                       const GuestMemory& memory, const VirtioPlacement& placement,
+                                       std::size_t queueCount)
     : PciFunction(0x1AF4, static_cast<std::uint16_t>(0x1040 + virtioType), classCode, subclass, 0x00, 0x01),
-      memory_(memory), queues_(queueCount), sink_(sink), gsi_(gsi), queueConfig_(queueCount)
+      memory_(memory), queues_(queueCount), sink_(placement.sink), gsi_(placement.gsi),
+      queueConfig_(queueCount), msix_(queueCount + 1)
 {
-    AttachIoBus(&ioBus);
+    AttachIoBus(&placement.ioBus);
+    AttachMmioBus(&placement.mmioBus);
     SetSubsystem(0x1AF4, 0x1100);
-    SetInterrupt(static_cast<std::uint8_t>(gsi), 1);
-    config_[0x04] = 0x05;
-    SetIoBar(0, ioBase, 256, this);
+    SetInterrupt(static_cast<std::uint8_t>(placement.gsi), 1);
+    config_[0x04] |= 0x04; // Bus master, as left by the firmware.
+    SetIoBar(0, placement.ioBase, 256, this);
+    SetMmioBar(1, placement.mmioBase, kMmioBarSize, this);
 
-    // Capability list: common, notify, ISR, device configuration.
+    // Capability list: common, notify, ISR, device configuration, MSI-X.
     config_[0x06] |= 0x10;
     config_[0x34] = 0x40;
     AddCapability(0x40, 0x50, kCapCommon, kCommonOffset, kCommonLength);
     AddCapability(0x50, 0x64, kCapNotify, kNotifyOffset, 2, 4); // notify_off_multiplier = 0.
     AddCapability(0x64, 0x74, kCapIsr, kIsrOffset, 1);
-    AddCapability(0x74, 0x00, kCapDevice, kDeviceOffset, kDeviceLength);
+    AddCapability(0x74, kMsixCapability, kCapDevice, kDeviceOffset, kDeviceLength);
+
+    auto* msix = &config_[kMsixCapability];
+    msix[0] = 0x11;
+    msix[1] = 0x00;
+    const auto tableSize = static_cast<std::uint16_t>(msix_.size() - 1);
+    msix[2] = static_cast<std::uint8_t>(tableSize);
+    msix[3] = static_cast<std::uint8_t>(tableSize >> 8);
+    writeMask_[kMsixCapability + 3] = 0xC0; // MSI-X Enable, Function Mask.
+    const std::uint32_t table = kMsixTableOffset | 1; // BIR 1.
+    const std::uint32_t pba = kMsixPbaOffset | 1;
+    for (int byte = 0; byte < 4; ++byte) {
+        msix[4 + byte] = static_cast<std::uint8_t>(table >> (byte * 8));
+        msix[8 + byte] = static_cast<std::uint8_t>(pba >> (byte * 8));
+    }
 }
 
 void VirtioModernDevice::AddCapability(std::uint8_t position, std::uint8_t next, std::uint8_t type,
@@ -46,6 +65,8 @@ void VirtioModernDevice::AddCapability(std::uint8_t position, std::uint8_t next,
         cap[12 + byte] = static_cast<std::uint8_t>(length >> (byte * 8));
     }
 }
+
+// --- BAR0: virtio registers ----------------------------------------------------------------------
 
 std::uint32_t VirtioModernDevice::IoRead(std::uint16_t port, std::uint8_t size)
 {
@@ -136,7 +157,8 @@ void VirtioModernDevice::WriteCommon(std::uint32_t offset, std::uint8_t size, st
             driverFeatures_ &= OfferedFeatures();
         }
         break;
-    case 0x10: configVector_ = static_cast<std::uint16_t>(value); break;
+    // The driver reads vectors back: NO_VECTOR tells it the vector was refused.
+    case 0x10: configVector_ = AcceptVector(value & 0xFFFF); break;
     case 0x14: {
         auto status = static_cast<std::uint8_t>(value);
         if (status == 0) {
@@ -161,7 +183,7 @@ void VirtioModernDevice::WriteCommon(std::uint32_t offset, std::uint8_t size, st
             }
         }
         break;
-    case 0x1A: if (queue != nullptr) queue->vector = static_cast<std::uint16_t>(value); break;
+    case 0x1A: if (queue != nullptr) queue->vector = AcceptVector(value & 0xFFFF); break;
     case 0x1C:
         if (queue != nullptr && (value & 1) != 0 && !queue->enabled) {
             queue->enabled = true;
@@ -183,16 +205,22 @@ void VirtioModernDevice::Reset()
     driverFeatures_ = 0;
     deviceFeatureSelect_ = 0;
     driverFeatureSelect_ = 0;
-    configVector_ = 0xFFFF;
+    configVector_ = kNoVector;
     selected_ = 0;
     status_ = 0;
     isr_ = 0;
     UpdateLine();
 }
 
+// --- Interrupts ----------------------------------------------------------------------------------
+
 void VirtioModernDevice::SignalUsedBuffers(std::uint16_t queue)
 {
-    if (queue < queues_.size() && queues_[queue].InterruptSuppressed(memory_)) return;
+    if (queue >= queues_.size() || queues_[queue].InterruptSuppressed(memory_)) return;
+    if (MsixEnabled()) {
+        SendVector(queueConfig_[queue].vector);
+        return;
+    }
     isr_ |= 0x01;
     UpdateLine();
 }
@@ -200,16 +228,109 @@ void VirtioModernDevice::SignalUsedBuffers(std::uint16_t queue)
 void VirtioModernDevice::SignalConfigChange()
 {
     if (!DriverReady()) return;
+    if (MsixEnabled()) {
+        SendVector(configVector_);
+        return;
+    }
     isr_ |= 0x02;
     UpdateLine();
 }
 
 void VirtioModernDevice::UpdateLine()
 {
-    const bool asserted = isr_ != 0;
+    const bool asserted = isr_ != 0 && !MsixEnabled() && (Command() & kCommandIntxDisable) == 0;
     if (asserted == lineAsserted_) return;
     lineAsserted_ = asserted;
     sink_.SetGsi(gsi_, asserted);
+}
+
+void VirtioModernDevice::SendVector(std::uint16_t vector)
+{
+    if (vector >= msix_.size()) return; // NO_VECTOR: the driver wants no interrupt.
+    auto& entry = msix_[vector];
+    if (entry.masked || MsixFunctionMasked()) {
+        entry.pending = true;
+        return;
+    }
+    entry.pending = false;
+    sink_.SignalMsi(entry.address, entry.data);
+}
+
+void VirtioModernDevice::SendPendingVectors()
+{
+    if (!MsixEnabled() || MsixFunctionMasked()) return;
+    for (std::uint16_t vector = 0; vector < msix_.size(); ++vector) {
+        if (msix_[vector].pending && !msix_[vector].masked) SendVector(vector);
+    }
+}
+
+void VirtioModernDevice::ConfigWrite(std::uint32_t offset, std::uint8_t size, std::uint32_t value)
+{
+    PciFunction::ConfigWrite(offset, size, value);
+    // MSI-X enable / function mask, or INTx disable, may have changed.
+    UpdateLine();
+    SendPendingVectors();
+}
+
+// --- BAR1: MSI-X table and pending bits ----------------------------------------------------------
+
+std::uint32_t VirtioModernDevice::ReadMsixDword(std::uint32_t offset) const
+{
+    if (offset >= kMsixTableOffset && offset < kMsixTableOffset + msix_.size() * 16) {
+        const auto& entry = msix_[(offset - kMsixTableOffset) / 16];
+        switch (offset % 16) {
+        case 0: return static_cast<std::uint32_t>(entry.address);
+        case 4: return static_cast<std::uint32_t>(entry.address >> 32);
+        case 8: return entry.data;
+        default: return entry.masked ? 1u : 0u;
+        }
+    }
+    if (offset >= kMsixPbaOffset && offset < kMsixPbaOffset + ((msix_.size() + 63) / 64) * 8) {
+        const auto first = (offset - kMsixPbaOffset) * 8;
+        std::uint32_t bits = 0;
+        for (std::uint32_t bit = 0; bit < 32 && first + bit < msix_.size(); ++bit) {
+            if (msix_[first + bit].pending) bits |= 1u << bit;
+        }
+        return bits;
+    }
+    return 0;
+}
+
+void VirtioModernDevice::WriteMsixDword(std::uint32_t offset, std::uint32_t value)
+{
+    if (offset < kMsixTableOffset || offset >= kMsixTableOffset + msix_.size() * 16) return; // PBA is read-only.
+    const auto vector = static_cast<std::uint16_t>((offset - kMsixTableOffset) / 16);
+    auto& entry = msix_[vector];
+    switch (offset % 16) {
+    case 0: entry.address = (entry.address & 0xFFFFFFFF00000000ull) | value; break;
+    case 4: entry.address = (entry.address & 0xFFFFFFFFull) | (static_cast<std::uint64_t>(value) << 32); break;
+    case 8: entry.data = value; break;
+    default: {
+        const bool wasMasked = entry.masked;
+        entry.masked = (value & 1) != 0;
+        if (wasMasked && !entry.masked && entry.pending && MsixEnabled()) SendVector(vector);
+        break;
+    }
+    }
+}
+
+std::uint64_t VirtioModernDevice::MmioRead(std::uint64_t address, std::uint8_t size)
+{
+    const auto offset = static_cast<std::uint32_t>(address - MmioBarBase(1));
+    const auto aligned = offset & ~3u;
+    std::uint64_t value = ReadMsixDword(aligned);
+    if (size == 8) value |= static_cast<std::uint64_t>(ReadMsixDword(aligned + 4)) << 32;
+    value >>= (offset & 3) * 8;
+    return size >= 8 ? value : value & ((1ull << (size * 8)) - 1);
+}
+
+void VirtioModernDevice::MmioWrite(std::uint64_t address, std::uint8_t size, std::uint64_t value)
+{
+    const auto offset = static_cast<std::uint32_t>(address - MmioBarBase(1));
+    // The table is written with 32- or 64-bit accesses (PCI spec 6.8.2).
+    if ((offset & 3) != 0 || size < 4) return;
+    WriteMsixDword(offset, static_cast<std::uint32_t>(value));
+    if (size == 8) WriteMsixDword(offset + 4, static_cast<std::uint32_t>(value >> 32));
 }
 
 } // namespace vmm

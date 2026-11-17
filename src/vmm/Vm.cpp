@@ -56,18 +56,22 @@ void AppendArgument(std::string& commandLine, const std::string& argument)
     commandLine += argument;
 }
 
-constexpr std::uint16_t kVirtioNetIoBase = 0xC100;
-constexpr std::uint16_t kVirtioBlkIoBase = 0xC200;
-constexpr std::uint16_t kVirtioGpuIoBase = 0xC300;
-constexpr std::uint16_t kVirtioTabletIoBase = 0xC400;
+// virtio PCI functions: slot, INTx line (GSI) used only without MSI-X.
+// Each slot gets I/O BAR0 at 0xC000 + slot * 0x100 and MMIO BAR1 at
+// kVirtioMmioBase + slot * 64 KiB, inside the PCI root window (_CRS).
+constexpr std::uint8_t kVirtioNetSlot = 3;
+constexpr std::uint8_t kVirtioBlkSlot = 4;
+constexpr std::uint8_t kVirtioGpuSlot = 5;
+constexpr std::uint8_t kVirtioTabletSlot = 6;
+constexpr std::uint8_t kVirtioSerialSlot = 7;
+constexpr std::uint8_t kVirtioSoundSlot = 8;
 constexpr std::uint32_t kVirtioNetGsi = 11;
 constexpr std::uint32_t kVirtioBlkGsi = 10;
 constexpr std::uint32_t kVirtioGpuGsi = 16;
 constexpr std::uint32_t kVirtioTabletGsi = 17;
-constexpr std::uint16_t kVirtioSerialIoBase = 0xC500;
 constexpr std::uint32_t kVirtioSerialGsi = 18;
-constexpr std::uint16_t kVirtioSoundIoBase = 0xC600;
 constexpr std::uint32_t kVirtioSoundGsi = 19;
+constexpr std::uint32_t kVirtioMmioBase = 0xFE000000;
 
 std::wstring WidenUtf8(const std::string& text)
 {
@@ -209,16 +213,26 @@ void Vm::BuildDevices()
     if (disk_ && config_.diskBus == DiskBus::Ide) ide_->AttachDisk(0, &*disk_);
     if (iso_) ide_->AttachCdrom(1, iso_.get());
 
+    const auto placement = [this, sink](std::uint8_t slot, std::uint32_t gsi) {
+        return VirtioPlacement{ioBus_, mmioBus_, *sink, static_cast<std::uint16_t>(0xC000 + slot * 0x100),
+                               kVirtioMmioBase + slot * 0x10000u, gsi};
+    };
+
     if (config_.network != NetworkMode::None) {
-        auto net = std::make_unique<VirtioNet>(*memory_, *sink, ioBus_, kVirtioNetIoBase, kVirtioNetGsi,
+        auto net = std::make_unique<VirtioNet>(*memory_, placement(kVirtioNetSlot, kVirtioNetGsi),
             [this](std::span<const std::uint8_t> frame) { return network_ && network_->Send(frame); }, config_.mac);
         virtioNet_ = net.get();
-        pciBus_->Add(3, 0, net.get());
+        pciBus_->Add(kVirtioNetSlot, 0, net.get());
         pciFunctions_.push_back(std::move(net));
-        auto receive = [this](std::span<const std::uint8_t> frame) {
-            const DeviceGuard guard(deviceLock_);
-            if (virtioNet_ != nullptr) virtioNet_->Receive(frame);
-        };
+        GuestPort receive{
+            [this](std::span<const std::uint8_t> frame) {
+                const DeviceGuard guard(deviceLock_);
+                if (virtioNet_ != nullptr) virtioNet_->Receive(frame);
+            },
+            [this] {
+                const DeviceGuard guard(deviceLock_);
+                if (virtioNet_ != nullptr) virtioNet_->FlushReceived();
+            }};
         // A backend that cannot start leaves the card in place, cable unplugged.
         try {
             switch (config_.network) {
@@ -248,25 +262,24 @@ void Vm::BuildDevices()
         virtioNet_->SetLinkUp(network_ != nullptr);
     }
     if (disk_ && config_.diskBus == DiskBus::Virtio) {
-        auto blk = std::make_unique<VirtioBlk>(*memory_, *sink, deviceLock_, ioBus_, kVirtioBlkIoBase,
-                                               kVirtioBlkGsi, *disk_);
+        auto blk = std::make_unique<VirtioBlk>(*memory_, placement(kVirtioBlkSlot, kVirtioBlkGsi), deviceLock_, *disk_);
         virtioBlk_ = blk.get();
-        pciBus_->Add(4, 0, blk.get());
+        pciBus_->Add(kVirtioBlkSlot, 0, blk.get());
         pciFunctions_.push_back(std::move(blk));
     }
 
     if (config_.display == DisplayMode::Graphics && config_.virtioGpu && framebuffer_) {
-        auto gpu = std::make_unique<VirtioGpu>(*memory_, *sink, deviceLock_, ioBus_, kVirtioGpuIoBase, kVirtioGpuGsi,
+        auto gpu = std::make_unique<VirtioGpu>(*memory_, placement(kVirtioGpuSlot, kVirtioGpuGsi), deviceLock_,
                                                framebuffer_->width, framebuffer_->height,
                                                framebuffer_->base, memory_->FramebufferBytes(), config_.gpu3d);
         virtioGpu_ = gpu.get();
-        pciBus_->Add(5, 0, gpu.get());
+        pciBus_->Add(kVirtioGpuSlot, 0, gpu.get());
         pciFunctions_.push_back(std::move(gpu));
     }
     if (config_.display == DisplayMode::Graphics && config_.tablet) {
-        auto tablet = std::make_unique<VirtioTablet>(*memory_, *sink, ioBus_, kVirtioTabletIoBase, kVirtioTabletGsi);
+        auto tablet = std::make_unique<VirtioTablet>(*memory_, placement(kVirtioTabletSlot, kVirtioTabletGsi));
         tablet_ = tablet.get();
-        pciBus_->Add(6, 0, tablet.get());
+        pciBus_->Add(kVirtioTabletSlot, 0, tablet.get());
         pciFunctions_.push_back(std::move(tablet));
     }
 
@@ -275,20 +288,20 @@ void Vm::BuildDevices()
         agent_ = std::make_unique<GuestAgent>(deviceLock_);
         auto* agent = agent_.get();
         auto serial = std::make_unique<VirtioSerial>(
-            *memory_, *sink, ioBus_, kVirtioSerialIoBase, kVirtioSerialGsi, GuestAgent::kPortName,
+            *memory_, placement(kVirtioSerialSlot, kVirtioSerialGsi), GuestAgent::kPortName,
             [agent](std::span<const std::uint8_t> data) { agent->OnBytes(data); },
             [agent](bool open) { agent->OnOpen(open); });
         agent->Attach(serial.get());
-        pciBus_->Add(7, 0, serial.get());
+        pciBus_->Add(kVirtioSerialSlot, 0, serial.get());
         pciFunctions_.push_back(std::move(serial));
     }
 
     if (config_.audio) {
         try {
-            auto sound = std::make_unique<VirtioSound>(*memory_, *sink, deviceLock_, ioBus_, kVirtioSoundIoBase,
-                                                       kVirtioSoundGsi, L"Virtualiseur — " + WidenUtf8(config_.name));
+            auto sound = std::make_unique<VirtioSound>(*memory_, placement(kVirtioSoundSlot, kVirtioSoundGsi),
+                                                       deviceLock_, L"Virtualiseur — " + WidenUtf8(config_.name));
             sound_ = sound.get();
-            pciBus_->Add(8, 0, sound.get());
+            pciBus_->Add(kVirtioSoundSlot, 0, sound.get());
             pciFunctions_.push_back(std::move(sound));
         } catch (const std::exception& error) {
             VMM_WARN("Carte son désactivée : %s", error.what());
@@ -298,9 +311,12 @@ void Vm::BuildDevices()
     AcpiConfig acpi;
     acpi.cpuCount = config_.cpus;
     acpi.pciMmioStart = static_cast<std::uint32_t>(memory_->LowRamEnd());
-    acpi.pciRoutes = {{3, static_cast<std::uint8_t>(kVirtioNetGsi)}, {4, static_cast<std::uint8_t>(kVirtioBlkGsi)},
-                      {5, static_cast<std::uint8_t>(kVirtioGpuGsi)}, {6, static_cast<std::uint8_t>(kVirtioTabletGsi)},
-                      {7, static_cast<std::uint8_t>(kVirtioSerialGsi)}, {8, static_cast<std::uint8_t>(kVirtioSoundGsi)}};
+    acpi.pciRoutes = {{kVirtioNetSlot, static_cast<std::uint8_t>(kVirtioNetGsi)},
+                      {kVirtioBlkSlot, static_cast<std::uint8_t>(kVirtioBlkGsi)},
+                      {kVirtioGpuSlot, static_cast<std::uint8_t>(kVirtioGpuGsi)},
+                      {kVirtioTabletSlot, static_cast<std::uint8_t>(kVirtioTabletGsi)},
+                      {kVirtioSerialSlot, static_cast<std::uint8_t>(kVirtioSerialGsi)},
+                      {kVirtioSoundSlot, static_cast<std::uint8_t>(kVirtioSoundGsi)}};
     const auto rsdp = BuildAcpiTables(*memory_, acpi);
     (void)rsdp;
 }
@@ -571,7 +587,8 @@ std::string Vm::Statistics() const
 {
     std::ostringstream text;
     text << "sorties=" << exits_.load() << " io=" << ioExits_.load() << " mmio=" << mmioExits_.load()
-         << " irq_ioapic=" << ioApic_->DeliveredCount() << " ticks_pit=" << pit_->TimerInterrupts();
+         << " irq_ioapic=" << ioApic_->DeliveredCount() << " irq_msi=" << ioApic_->MsiCount()
+         << " ticks_pit=" << pit_->TimerInterrupts();
     if (virtioBlk_ != nullptr) text << " virtio_blk=" << virtioBlk_->CompletedRequests();
     if (virtioGpu_ != nullptr) {
         text << " gpu_flush=" << virtioGpu_->Flushes();
@@ -605,8 +622,9 @@ void Vm::PortWrite(std::uint16_t port, std::uint8_t size, std::uint32_t value)
 
 void Vm::MemoryAccess(std::uint64_t gpa, std::uint8_t* data, std::uint8_t size, bool write)
 {
+    // PCI BAR moves change the MMIO map: look it up under the lock.
+    std::unique_lock guard(deviceLock_);
     if (auto* device = mmioBus_.Find(gpa)) {
-        const DeviceGuard guard(deviceLock_);
         if (write) {
             std::uint64_t value = 0;
             std::memcpy(&value, data, (std::min<std::size_t>)(size, 8));
@@ -617,6 +635,7 @@ void Vm::MemoryAccess(std::uint64_t gpa, std::uint8_t* data, std::uint8_t size, 
         }
         return;
     }
+    guard.unlock();
     if (auto* host = memory_->Pointer(gpa, size)) {
         if (write) std::memcpy(host, data, size);
         else std::memcpy(data, host, size);

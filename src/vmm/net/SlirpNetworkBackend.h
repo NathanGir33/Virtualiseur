@@ -23,7 +23,7 @@ namespace vmm {
 // no host): only the port forwards reach it ("réseau privé hôte").
 class SlirpNetworkBackend final : public NetworkBackend {
 public:
-    explicit SlirpNetworkBackend(ReceiveFrame receiveFrame, bool restricted = false,
+    explicit SlirpNetworkBackend(GuestPort guest, bool restricted = false,
                                  const std::vector<PortForward>& forwards = {});
     ~SlirpNetworkBackend() override;
     SlirpNetworkBackend(const SlirpNetworkBackend&) = delete;
@@ -50,7 +50,8 @@ private:
     void Wake() noexcept;
     void ProcessTimers();
 
-    ReceiveFrame receiveFrame_;
+    GuestPort guest_;
+    bool delivered_ = false; // Frames given to the guest since the last flush (worker thread).
     SlirpCb callbacks_{};
     struct Slirp* slirp_ = nullptr;
     std::thread worker_;

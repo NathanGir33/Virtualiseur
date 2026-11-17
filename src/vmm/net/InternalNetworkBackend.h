@@ -20,7 +20,7 @@ namespace vmm {
 // broadcasts and multicasts.
 class InternalNetworkBackend final : public NetworkBackend {
 public:
-    InternalNetworkBackend(ReceiveFrame receive, const std::string& name, const MacAddress& mac);
+    InternalNetworkBackend(GuestPort guest, const std::string& name, const MacAddress& mac);
     ~InternalNetworkBackend() override;
 
     bool Send(std::span<const std::uint8_t> frame) override;
@@ -28,7 +28,7 @@ public:
 private:
     void Run();
 
-    ReceiveFrame receive_;
+    GuestPort guest_;
     MacAddress mac_;
     std::uint32_t tag_ = 0;
     sockaddr_in group_{};

@@ -27,7 +27,7 @@ class BridgeNetworkBackend final : public NetworkBackend {
 public:
     // `adapter`: friendly name ("Wi-Fi"), description or GUID; empty picks
     // the first connected Ethernet or Wi-Fi adapter.
-    BridgeNetworkBackend(ReceiveFrame receive, const std::string& adapter, const MacAddress& guestMac);
+    BridgeNetworkBackend(GuestPort guest, const std::string& adapter, const MacAddress& guestMac);
     ~BridgeNetworkBackend() override;
 
     bool Send(std::span<const std::uint8_t> frame) override;
@@ -39,7 +39,14 @@ private:
     void ApplyFilter();
     void LearnGuestIp(std::uint32_t address);
 
-    ReceiveFrame receive_;
+    void Deliver(std::span<const std::uint8_t> frame)
+    {
+        guest_.deliver(frame);
+        delivered_ = true;
+    }
+
+    GuestPort guest_;
+    bool delivered_ = false; // Frames given to the guest since the last flush (capture thread).
     std::unique_ptr<Api> api_;
     void* rx_ = nullptr;
     void* tx_ = nullptr;

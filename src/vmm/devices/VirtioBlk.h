@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Virtio.h"
+#include "VirtioModern.h"
 
 #include "VirtualDisk.h"
 
@@ -12,18 +12,19 @@
 
 namespace vmm {
 
-// virtio-blk (1AF4:1001). Requests are executed on a dedicated I/O thread so
-// the vCPU returns to the guest immediately after the queue notification.
-class VirtioBlk final : public VirtioPciDevice {
+// virtio-blk (modern, 1AF4:1042). Requests are executed on a dedicated I/O
+// thread so the vCPU returns to the guest immediately after the queue
+// notification.
+class VirtioBlk final : public VirtioModernDevice {
 public:
-    VirtioBlk(const GuestMemory& memory, InterruptSink& sink, DeviceLock& lock, IoBus& ioBus,
-              std::uint16_t ioBase, std::uint32_t gsi, virtualiseur::whp::VirtualDisk& disk);
+    VirtioBlk(const GuestMemory& memory, const VirtioPlacement& placement, DeviceLock& lock,
+              virtualiseur::whp::VirtualDisk& disk);
     ~VirtioBlk() override;
 
     std::uint64_t CompletedRequests() const noexcept { return completed_; }
 
 protected:
-    std::uint32_t DeviceFeatures() const override;
+    std::uint64_t DeviceFeatures() const override;
     std::uint8_t ReadDeviceConfig(std::uint32_t offset) override;
     void QueueNotify(std::uint16_t queue) override;
     void DeviceReset() override;

@@ -22,13 +22,15 @@ public:
     virtual void MmioWrite(std::uint64_t address, std::uint8_t size, std::uint64_t value) = 0;
 };
 
-// Receives interrupt line changes from device models. "gsi" is the global
-// system interrupt number (I/O APIC input); ISA IRQs are translated by the
-// caller with IsaIrqToGsi().
+// Receives interrupts from device models. "gsi" is the global system
+// interrupt number (I/O APIC input); ISA IRQs are translated by the caller
+// with IsaIrqToGsi(). SignalMsi sends a message-signalled interrupt (MSI or
+// MSI-X table entry): edge-triggered, no line state, no EOI round trip.
 class InterruptSink {
 public:
     virtual ~InterruptSink() = default;
     virtual void SetGsi(std::uint32_t gsi, bool asserted) = 0;
+    virtual void SignalMsi(std::uint64_t address, std::uint32_t data) = 0;
 };
 
 // ISA IRQ 0 (PIT) is wired to I/O APIC input 2, as on every PC chipset and as
@@ -65,6 +67,16 @@ public:
     void Register(std::uint64_t base, std::uint64_t size, MmioDevice* device)
     {
         ranges_.push_back({base, size, device});
+    }
+
+    void Unregister(std::uint64_t base, MmioDevice* device)
+    {
+        for (auto it = ranges_.begin(); it != ranges_.end(); ++it) {
+            if (it->base == base && it->device == device) {
+                ranges_.erase(it);
+                return;
+            }
+        }
     }
 
     MmioDevice* Find(std::uint64_t address) const noexcept

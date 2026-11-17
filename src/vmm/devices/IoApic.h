@@ -4,6 +4,7 @@
 #include "WindowsHypervisorBackend.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 namespace vmm {
@@ -22,9 +23,13 @@ public:
     void MmioWrite(std::uint64_t address, std::uint8_t size, std::uint64_t value) override;
 
     void SetGsi(std::uint32_t gsi, bool asserted) override;
+    // MSI messages bypass the I/O APIC pins: they go straight to WHP's local
+    // APICs (thread-safe, no device state touched).
+    void SignalMsi(std::uint64_t address, std::uint32_t data) override;
     void EndOfInterrupt(std::uint32_t vector);
 
     std::uint64_t DeliveredCount() const noexcept { return delivered_; }
+    std::uint64_t MsiCount() const noexcept { return msiDelivered_.load(); }
     bool AnyPinProgrammed() const noexcept { return programmed_; }
 
 private:
@@ -44,6 +49,7 @@ private:
     std::uint32_t select_ = 0;
     std::uint32_t id_ = 0;
     std::uint64_t delivered_ = 0;
+    std::atomic_uint64_t msiDelivered_ = 0;
     bool programmed_ = false;
 };
 

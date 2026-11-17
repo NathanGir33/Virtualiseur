@@ -25,7 +25,7 @@ void PciFunction::SetIoBar(std::uint32_t index, std::uint16_t base, std::uint16_
 {
     auto& bar = bars_[index];
     bar.size = size;
-    bar.handler = handler;
+    bar.io = handler;
     const std::uint32_t value = (static_cast<std::uint32_t>(base) & ~static_cast<std::uint32_t>(size - 1)) | 0x01;
     const std::uint32_t mask = 0xFFFFFFFCu & ~static_cast<std::uint32_t>(size - 1);
     const auto offset = 0x10 + index * 4;
@@ -34,6 +34,22 @@ void PciFunction::SetIoBar(std::uint32_t index, std::uint16_t base, std::uint16_
         writeMask_[offset + byte] = static_cast<std::uint8_t>(mask >> (byte * 8));
     }
     config_[0x04] |= 0x01; // Firmware leaves I/O decoding enabled.
+    RemapBars();
+}
+
+void PciFunction::SetMmioBar(std::uint32_t index, std::uint32_t base, std::uint32_t size, MmioDevice* handler)
+{
+    auto& bar = bars_[index];
+    bar.size = size;
+    bar.mmio = handler;
+    const std::uint32_t value = base & ~(size - 1); // 32-bit, non-prefetchable.
+    const std::uint32_t mask = 0xFFFFFFF0u & ~(size - 1);
+    const auto offset = 0x10 + index * 4;
+    for (std::uint32_t byte = 0; byte < 4; ++byte) {
+        config_[offset + byte] = static_cast<std::uint8_t>(value >> (byte * 8));
+        writeMask_[offset + byte] = static_cast<std::uint8_t>(mask >> (byte * 8));
+    }
+    config_[0x04] |= 0x02; // Firmware leaves memory decoding enabled.
     RemapBars();
 }
 
@@ -85,25 +101,47 @@ void PciFunction::ConfigWrite(std::uint32_t offset, std::uint8_t size, std::uint
     if (barsTouched) RemapBars();
 }
 
+std::uint32_t PciFunction::BarAddress(std::uint32_t index) const noexcept
+{
+    const auto offset = 0x10 + index * 4;
+    return static_cast<std::uint32_t>(config_[offset]) | (static_cast<std::uint32_t>(config_[offset + 1]) << 8) |
+           (static_cast<std::uint32_t>(config_[offset + 2]) << 16) | (static_cast<std::uint32_t>(config_[offset + 3]) << 24);
+}
+
 void PciFunction::RemapBars()
 {
-    if (ioBus_ == nullptr) return;
     const bool ioEnabled = (config_[0x04] & 0x01) != 0;
+    const bool memoryEnabled = (config_[0x04] & 0x02) != 0;
     for (std::uint32_t index = 0; index < bars_.size(); ++index) {
         auto& bar = bars_[index];
-        if (bar.handler == nullptr) continue;
-        const auto offset = 0x10 + index * 4;
-        const auto base = static_cast<std::uint16_t>((config_[offset] | (config_[offset + 1] << 8)) & 0xFFFC);
-        const bool shouldMap = ioEnabled && base != 0 && base <= 0xFFFF - bar.size + 1 &&
-                               (config_[offset + 2] == 0 && config_[offset + 3] == 0);
-        if (bar.mapped && (!shouldMap || bar.mappedBase != base)) {
-            ioBus_->Unregister(bar.mappedBase, bar.size, bar.handler);
-            bar.mapped = false;
-        }
-        if (shouldMap && !bar.mapped) {
-            ioBus_->Register(base, bar.size, bar.handler);
-            bar.mappedBase = base;
-            bar.mapped = true;
+        if (bar.io != nullptr && ioBus_ != nullptr) {
+            const auto address = BarAddress(index) & 0xFFFFFFFCu;
+            const bool shouldMap = ioEnabled && address != 0 && address <= 0x10000u - bar.size;
+            if (bar.mapped && (!shouldMap || bar.mappedBase != address)) {
+                ioBus_->Unregister(static_cast<std::uint16_t>(bar.mappedBase), bar.size, bar.io);
+                bar.mapped = false;
+            }
+            if (shouldMap && !bar.mapped) {
+                ioBus_->Register(static_cast<std::uint16_t>(address), bar.size, bar.io);
+                bar.mappedBase = address;
+                bar.mapped = true;
+            }
+        } else if (bar.mmio != nullptr && mmioBus_ != nullptr) {
+            const auto address = BarAddress(index) & 0xFFFFFFF0u;
+            // Sizing writes all ones: such a BAR wraps past 4 GiB and stays unmapped.
+            const bool shouldMap = memoryEnabled && address != 0 &&
+                                   static_cast<std::uint64_t>(address) + bar.size <= 0xFEC00000ull;
+            if (bar.mapped && (!shouldMap || bar.mappedBase != address)) {
+                mmioBus_->Unregister(bar.mappedBase, bar.mmio);
+                bar.mapped = false;
+                MmioBarChanged(index, 0, false);
+            }
+            if (shouldMap && !bar.mapped) {
+                mmioBus_->Register(address, bar.size, bar.mmio);
+                bar.mappedBase = address;
+                bar.mapped = true;
+                MmioBarChanged(index, address, true);
+            }
         }
     }
 }

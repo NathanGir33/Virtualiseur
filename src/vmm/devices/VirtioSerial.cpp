@@ -22,9 +22,9 @@ constexpr std::uint16_t kPortTransmit = 5;    // Guest -> host data.
 constexpr std::size_t kMaxOutgoing = 64u * 1024 * 1024;
 } // namespace
 
-VirtioSerial::VirtioSerial(const GuestMemory& memory, InterruptSink& sink, IoBus& ioBus, std::uint16_t ioBase,
-                           std::uint32_t gsi, std::string portName, Receive receive, OpenChanged openChanged)
-    : VirtioModernDevice(3, 0x07, 0x80, memory, sink, gsi, ioBus, ioBase, 6),
+VirtioSerial::VirtioSerial(const GuestMemory& memory, const VirtioPlacement& placement, std::string portName,
+                           Receive receive, OpenChanged openChanged)
+    : VirtioModernDevice(3, 0x07, 0x80, memory, placement, 6),
       portName_(std::move(portName)), receive_(std::move(receive)), openChanged_(std::move(openChanged))
 {
 }

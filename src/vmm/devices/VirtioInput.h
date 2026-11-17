@@ -16,7 +16,7 @@ public:
     static constexpr std::int32_t kAbsMax = 32767;
     enum class Button : std::uint16_t { Left = 0x110, Right = 0x111, Middle = 0x112, Side = 0x113, Extra = 0x114 };
 
-    VirtioTablet(const GuestMemory& memory, InterruptSink& sink, IoBus& ioBus, std::uint16_t ioBase, std::uint32_t gsi);
+    VirtioTablet(const GuestMemory& memory, const VirtioPlacement& placement);
 
     // Host input; called with the device lock held.
     bool Ready() const noexcept { return DriverReady() && queues_[0].Ready(); }

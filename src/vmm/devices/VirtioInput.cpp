@@ -34,9 +34,8 @@ void SetBit(std::uint8_t* bitmap, std::uint32_t bit, std::uint8_t& size)
 }
 } // namespace
 
-VirtioTablet::VirtioTablet(const GuestMemory& memory, InterruptSink& sink, IoBus& ioBus,
-                           std::uint16_t ioBase, std::uint32_t gsi)
-    : VirtioModernDevice(18, 0x09, 0x80, memory, sink, gsi, ioBus, ioBase, 2)
+VirtioTablet::VirtioTablet(const GuestMemory& memory, const VirtioPlacement& placement)
+    : VirtioModernDevice(18, 0x09, 0x80, memory, placement, 2)
 {
 }
 

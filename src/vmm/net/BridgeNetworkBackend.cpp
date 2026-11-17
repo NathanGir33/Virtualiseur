@@ -193,8 +193,8 @@ struct BridgeNetworkBackend::Api {
     }
 };
 
-BridgeNetworkBackend::BridgeNetworkBackend(ReceiveFrame receive, const std::string& adapter, const MacAddress& guestMac)
-    : receive_(std::move(receive)), api_(std::make_unique<Api>()), guestMac_(guestMac)
+BridgeNetworkBackend::BridgeNetworkBackend(GuestPort guest, const std::string& adapter, const MacAddress& guestMac)
+    : guest_(std::move(guest)), api_(std::make_unique<Api>()), guestMac_(guestMac)
 {
     if (!api_->Load()) {
         throw std::runtime_error("Npcap n'est pas installé (https://npcap.com) : l'accès par pont en a besoin.");
@@ -353,7 +353,7 @@ void BridgeNetworkBackend::Handle(const std::uint8_t* data, std::size_t length)
     const auto type = Load16(data + 12);
     if (!wireless_) {
         if (std::memcmp(source, guestMac_.data(), 6) == 0) return; // Our own injected frame.
-        receive_(std::span(data, length));
+        Deliver(std::span(data, length));
         return;
     }
 
@@ -376,7 +376,7 @@ void BridgeNetworkBackend::Handle(const std::uint8_t* data, std::size_t length)
     }
     if (IsMulticast(destination)) {
         if (type == kTypeIpv6) return;
-        receive_(std::span(data, length));
+        Deliver(std::span(data, length));
         return;
     }
     if (std::memcmp(destination, hostMac_.data(), 6) != 0) return;
@@ -387,7 +387,7 @@ void BridgeNetworkBackend::Handle(const std::uint8_t* data, std::size_t length)
         if (length < udp + 8 + 34 || std::memcmp(data + udp + 8 + 28, guestMac_.data(), 6) != 0) return;
         frame.assign(data, data + length);
         std::memcpy(frame.data(), guestMac_.data(), 6);
-        receive_(frame);
+        Deliver(frame);
         return;
     }
     if (ip == 0) return;
@@ -401,7 +401,7 @@ void BridgeNetworkBackend::Handle(const std::uint8_t* data, std::size_t length)
     } else {
         return; // The host's own traffic.
     }
-    receive_(frame);
+    Deliver(frame);
 }
 
 void BridgeNetworkBackend::Run()
@@ -418,6 +418,10 @@ void BridgeNetworkBackend::Run()
             result = api_->nextEx(rx_, &header, &data);
             if (result != 1) break;
             Handle(data, header->captured);
+        }
+        if (delivered_) {
+            delivered_ = false;
+            guest_.flush(); // One interrupt per capture batch.
         }
         if (result < 0 && !reported) {
             VMM_WARN("Accès par pont : lecture impossible sur « %s » (%s).", adapterName_.c_str(), api_->getError(rx_));

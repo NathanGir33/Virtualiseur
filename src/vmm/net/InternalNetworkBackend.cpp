@@ -30,8 +30,8 @@ std::uint32_t HashName(const std::string& name)
 
 } // namespace
 
-InternalNetworkBackend::InternalNetworkBackend(ReceiveFrame receive, const std::string& name, const MacAddress& mac)
-    : receive_(std::move(receive)), mac_(mac), tag_(HashName(name))
+InternalNetworkBackend::InternalNetworkBackend(GuestPort guest, const std::string& name, const MacAddress& mac)
+    : guest_(std::move(guest)), mac_(mac), tag_(HashName(name))
 {
     WSADATA winsock{};
     if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0) throw std::runtime_error("WSAStartup a échoué.");
@@ -100,7 +100,14 @@ void InternalNetworkBackend::Run()
 {
     SetThreadDescription(GetCurrentThread(), L"Réseau interne");
     std::vector<std::uint8_t> packet(kTagSize + kMaxFrame);
+    bool delivered = false;
     while (!stopping_) {
+        // Interrupt the guest once the datagrams already queued are drained.
+        u_long queued = 0;
+        if (delivered && (ioctlsocket(socket_, FIONREAD, &queued) != 0 || queued == 0)) {
+            delivered = false;
+            guest_.flush();
+        }
         const int length = recv(socket_, reinterpret_cast<char*>(packet.data()), static_cast<int>(packet.size()), 0);
         if (length == SOCKET_ERROR) {
             if (stopping_) break;
@@ -119,7 +126,8 @@ void InternalNetworkBackend::Run()
         // the frames for our MAC and the broadcasts/multicasts.
         if (std::memcmp(frame + 6, mac_.data(), 6) == 0) continue;
         if (!IsMulticast(frame) && std::memcmp(frame, mac_.data(), 6) != 0) continue;
-        receive_(std::span(frame, static_cast<std::size_t>(length) - kTagSize));
+        guest_.deliver(std::span(frame, static_cast<std::size_t>(length) - kTagSize));
+        delivered = true;
     }
 }
 

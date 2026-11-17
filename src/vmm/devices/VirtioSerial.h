@@ -21,8 +21,8 @@ public:
     using Receive = std::function<void(std::span<const std::uint8_t>)>; // Device lock held.
     using OpenChanged = std::function<void(bool open)>;                  // Device lock held.
 
-    VirtioSerial(const GuestMemory& memory, InterruptSink& sink, IoBus& ioBus, std::uint16_t ioBase,
-                 std::uint32_t gsi, std::string portName, Receive receive, OpenChanged openChanged);
+    VirtioSerial(const GuestMemory& memory, const VirtioPlacement& placement, std::string portName,
+                 Receive receive, OpenChanged openChanged);
 
     // Device lock held.
     bool GuestOpen() const noexcept { return guestOpen_; }

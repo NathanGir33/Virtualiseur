@@ -9,9 +9,9 @@
 
 namespace vmm {
 
-// Type-0 PCI function with a 256-byte configuration space. I/O BARs are
-// re-registered on the I/O bus whenever the guest moves them or toggles
-// I/O decoding in the command register.
+// Type-0 PCI function with a 256-byte configuration space. Decoded BARs (I/O
+// BARs and MMIO BARs) are re-registered on their bus whenever the guest moves
+// them or toggles decoding in the command register.
 class PciFunction {
 public:
     PciFunction(std::uint16_t vendor, std::uint16_t device, std::uint8_t classCode,
@@ -19,9 +19,13 @@ public:
     virtual ~PciFunction() = default;
 
     void AttachIoBus(IoBus* bus) noexcept { ioBus_ = bus; }
+    void AttachMmioBus(MmioBus* bus) noexcept { mmioBus_ = bus; }
 
     // Declares an I/O BAR decoded by `handler`. `size` is a power of two >= 4.
     void SetIoBar(std::uint32_t index, std::uint16_t base, std::uint16_t size, IoDevice* handler);
+    // Declares a 32-bit memory BAR decoded by `handler` (MMIO exits). `size`
+    // is a power of two >= 4 KiB.
+    void SetMmioBar(std::uint32_t index, std::uint32_t base, std::uint32_t size, MmioDevice* handler);
     // Declares a 32-bit memory BAR backed by guest RAM mapped at a fixed
     // address (no decoding by the VMM). `size` is a power of two >= 16.
     void SetMemoryBar(std::uint32_t index, std::uint32_t base, std::uint32_t size, bool prefetchable);
@@ -36,20 +40,31 @@ public:
     bool BusMasterEnabled() const noexcept { return (Command() & 0x04) != 0; }
 
 protected:
+    // Called after an MMIO BAR is mapped at `base` or unmapped.
+    virtual void MmioBarChanged(std::uint32_t /*index*/, std::uint32_t /*base*/, bool /*mapped*/) {}
+    // Current guest-physical base of an MMIO BAR, 0 when not decoded.
+    std::uint32_t MmioBarBase(std::uint32_t index) const noexcept
+    {
+        return bars_[index].mapped ? bars_[index].mappedBase : 0;
+    }
+
     std::array<std::uint8_t, 256> config_{};
     std::array<std::uint8_t, 256> writeMask_{};
 
 private:
-    struct IoBar {
-        std::uint16_t size = 0;
-        std::uint16_t mappedBase = 0;
+    struct Bar {
+        std::uint32_t size = 0;
+        std::uint32_t mappedBase = 0;
         bool mapped = false;
-        IoDevice* handler = nullptr;
+        IoDevice* io = nullptr;
+        MmioDevice* mmio = nullptr;
     };
     void RemapBars();
+    std::uint32_t BarAddress(std::uint32_t index) const noexcept;
 
-    std::array<IoBar, 6> bars_{};
+    std::array<Bar, 6> bars_{};
     IoBus* ioBus_ = nullptr;
+    MmioBus* mmioBus_ = nullptr;
 };
 
 // PCI configuration mechanism #1 (ports 0xCF8-0xCFF) on bus 0, plus the

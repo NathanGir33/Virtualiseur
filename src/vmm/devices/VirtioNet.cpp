@@ -4,21 +4,21 @@
 
 namespace vmm {
 namespace {
-constexpr std::uint32_t kFeatureMac = 1u << 5;
-constexpr std::uint32_t kFeatureStatus = 1u << 16;
-constexpr std::size_t kHeaderSize = 10; // struct virtio_net_hdr without mergeable buffers.
+constexpr std::uint64_t kFeatureMac = 1ull << 5;
+constexpr std::uint64_t kFeatureStatus = 1ull << 16;
+// struct virtio_net_hdr: with VIRTIO_F_VERSION_1 it always includes the
+// 16-bit num_buffers field, mergeable RX buffers or not.
+constexpr std::size_t kHeaderSize = 12;
 constexpr std::size_t kMaxBacklog = 256;
 } // namespace
 
-VirtioNet::VirtioNet(const GuestMemory& memory, InterruptSink& sink, IoBus& ioBus,
-                     std::uint16_t ioBase, std::uint32_t gsi, Transmit transmit,
+VirtioNet::VirtioNet(const GuestMemory& memory, const VirtioPlacement& placement, Transmit transmit,
                      const std::array<std::uint8_t, 6>& mac)
-    : VirtioPciDevice(0x1000, 1, 0x02, 0x00, memory, sink, gsi, ioBus, ioBase, 2),
-      transmit_(std::move(transmit)), mac_(mac)
+    : VirtioModernDevice(1, 0x02, 0x00, memory, placement, 2), transmit_(std::move(transmit)), mac_(mac)
 {
 }
 
-std::uint32_t VirtioNet::DeviceFeatures() const
+std::uint64_t VirtioNet::DeviceFeatures() const
 {
     return kFeatureMac | kFeatureStatus | VirtQueue::kFeatureIndirectDescriptors;
 }
@@ -33,6 +33,7 @@ std::uint8_t VirtioNet::ReadDeviceConfig(std::uint32_t offset)
 void VirtioNet::DeviceReset()
 {
     backlog_.clear();
+    receivedUnsignalled_ = false;
 }
 
 void VirtioNet::QueueNotify(std::uint16_t queue)
@@ -78,6 +79,7 @@ bool VirtioNet::DeliverFrame(std::span<const std::uint8_t> frame)
     VirtQueue::Element element;
     if (!queue.Pop(memory_, element)) return false;
     std::vector<std::uint8_t> data(kHeaderSize, 0);
+    data[10] = 1; // num_buffers: the frame fits in this one chain.
     data.insert(data.end(), frame.begin(), frame.end());
     std::size_t copied = 0;
     for (const auto& buffer : element.writable) {
@@ -94,10 +96,17 @@ void VirtioNet::Receive(std::span<const std::uint8_t> frame)
 {
     if (!linkUp_) return;
     if (backlog_.empty() && DeliverFrame(frame)) {
-        SignalUsedBuffers(0);
+        receivedUnsignalled_ = true;
         return;
     }
     if (backlog_.size() < kMaxBacklog) backlog_.emplace_back(frame.begin(), frame.end());
+}
+
+void VirtioNet::FlushReceived()
+{
+    if (!receivedUnsignalled_) return;
+    receivedUnsignalled_ = false;
+    SignalUsedBuffers(0);
 }
 
 void VirtioNet::FlushBacklog()

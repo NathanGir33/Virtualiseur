@@ -65,11 +65,11 @@ struct SlirpNetworkBackend::PollContext {
     std::vector<WSAPOLLFD> descriptors;
 };
 
-SlirpNetworkBackend::SlirpNetworkBackend(ReceiveFrame receiveFrame, bool restricted,
+SlirpNetworkBackend::SlirpNetworkBackend(GuestPort guest, bool restricted,
                                          const std::vector<PortForward>& forwards)
-    : receiveFrame_(std::move(receiveFrame))
+    : guest_(std::move(guest))
 {
-    if (!receiveFrame_) throw std::invalid_argument("Le callback RX de libslirp est obligatoire.");
+    if (!guest_.deliver || !guest_.flush) throw std::invalid_argument("Le callback RX de libslirp est obligatoire.");
     WSADATA winsock{};
     const int startupResult = WSAStartup(MAKEWORD(2, 2), &winsock);
     if (startupResult != 0) {
@@ -190,12 +190,11 @@ std::int64_t SlirpNetworkBackend::ClockGetNs(void*)
 std::ptrdiff_t SlirpNetworkBackend::SendPacket(const void* packet, std::size_t length, void* opaque)
 {
     auto* self = static_cast<SlirpNetworkBackend*>(opaque);
-    if (self->receiveFrame_) {
-        try {
-            self->receiveFrame_(std::span(static_cast<const std::uint8_t*>(packet), length));
-        } catch (...) {
-            // A guest with no posted RX buffer may drop this frame; TCP retries it.
-        }
+    try {
+        self->guest_.deliver(std::span(static_cast<const std::uint8_t*>(packet), length));
+        self->delivered_ = true;
+    } catch (...) {
+        // A guest with no posted RX buffer may drop this frame; TCP retries it.
     }
     return static_cast<std::ptrdiff_t>(length);
 }
@@ -324,6 +323,13 @@ void SlirpNetworkBackend::Run()
         wakeDescriptor.fd = wakeReceiver_;
         wakeDescriptor.events = POLLRDNORM;
         pollContext.descriptors.push_back(wakeDescriptor);
+
+        // End of the burst: one interrupt for every frame of this round,
+        // before the poll may sleep.
+        if (delivered_) {
+            delivered_ = false;
+            guest_.flush();
+        }
 
         const int result = WSAPoll(pollContext.descriptors.data(),
             static_cast<ULONG>(pollContext.descriptors.size()), static_cast<int>(timeoutMs));

@@ -8,9 +8,9 @@
 
 namespace vmm {
 namespace {
-constexpr std::uint32_t kFeatureSegMax = 1u << 2;
-constexpr std::uint32_t kFeatureBlkSize = 1u << 6;
-constexpr std::uint32_t kFeatureFlush = 1u << 9;
+constexpr std::uint64_t kFeatureSegMax = 1ull << 2;
+constexpr std::uint64_t kFeatureBlkSize = 1ull << 6;
+constexpr std::uint64_t kFeatureFlush = 1ull << 9;
 constexpr std::uint32_t kSegMax = 254; // Queue size minus header and status descriptors.
 
 constexpr std::uint32_t kRequestIn = 0;
@@ -23,10 +23,9 @@ constexpr std::uint8_t kStatusIoError = 1;
 constexpr std::uint8_t kStatusUnsupported = 2;
 } // namespace
 
-VirtioBlk::VirtioBlk(const GuestMemory& memory, InterruptSink& sink, DeviceLock& lock, IoBus& ioBus,
-                     std::uint16_t ioBase, std::uint32_t gsi, virtualiseur::whp::VirtualDisk& disk)
-    : VirtioPciDevice(0x1001, 2, 0x01, 0x00, memory, sink, gsi, ioBus, ioBase, 1),
-      lock_(lock), disk_(disk)
+VirtioBlk::VirtioBlk(const GuestMemory& memory, const VirtioPlacement& placement, DeviceLock& lock,
+                     virtualiseur::whp::VirtualDisk& disk)
+    : VirtioModernDevice(2, 0x01, 0x00, memory, placement, 1), lock_(lock), disk_(disk)
 {
     wake_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     worker_ = std::jthread([this](std::stop_token stop) { Worker(stop); });
@@ -40,7 +39,7 @@ VirtioBlk::~VirtioBlk()
     if (wake_ != nullptr) CloseHandle(wake_);
 }
 
-std::uint32_t VirtioBlk::DeviceFeatures() const
+std::uint64_t VirtioBlk::DeviceFeatures() const
 {
     return kFeatureSegMax | kFeatureBlkSize | kFeatureFlush | VirtQueue::kFeatureIndirectDescriptors;
 }

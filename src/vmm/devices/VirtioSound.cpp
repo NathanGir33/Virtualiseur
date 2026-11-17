@@ -59,9 +59,9 @@ void Store(std::vector<std::uint8_t>& data, std::size_t offset, const void* valu
 
 } // namespace
 
-VirtioSound::VirtioSound(const GuestMemory& memory, InterruptSink& sink, DeviceLock& lock, IoBus& ioBus,
-                         std::uint16_t ioBase, std::uint32_t gsi, std::wstring sessionName)
-    : VirtioModernDevice(25, 0x04, 0x01, memory, sink, gsi, ioBus, ioBase, 4), lock_(lock)
+VirtioSound::VirtioSound(const GuestMemory& memory, const VirtioPlacement& placement, DeviceLock& lock,
+                         std::wstring sessionName)
+    : VirtioModernDevice(25, 0x04, 0x01, memory, placement, 4), lock_(lock)
 {
     output_ = std::make_unique<WasapiOutput>(std::move(sessionName), [this](std::uint8_t* destination, std::size_t bytes) {
         return Pull(destination, bytes);
