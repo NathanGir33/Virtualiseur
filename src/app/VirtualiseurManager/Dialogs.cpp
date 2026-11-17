@@ -37,6 +37,7 @@ enum ControlId : int {
     IdSnapshotClone,
     IdCloneName,
     IdCloneKind,
+    IdCloneCancel,
     IdPageTitle,
     IdMessage,
     IdName,
@@ -663,6 +664,9 @@ protected:
         }
         return nullptr;
     }
+
+    // The window was asked to close (Escape, close box) during a long operation.
+    bool Closing() const noexcept { return done_; }
 
     HWND window_ = nullptr;
     int page_ = 0;
@@ -1815,6 +1819,7 @@ private:
         AddButton(-1, IdSnapshotClone, L"Cloner…", kLeft + 300, 420, 140);
         AddStatic(-1, L"", kLeft, kHeight - 84, kRight - kLeft, 34, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
         AddButton(-1, IDCANCEL, L"Fermer", kRight - 100, kHeight - 46, 100, 32);
+        AddButton(-1, IdCloneCancel, L"Annuler la copie", kRight - 280, kHeight - 46, 170, 32);
         Reload(0);
         if (!stopped_) {
             SetMessage(L"Machine allumée : « Prendre » gèle d'abord ses systèmes de fichiers (qemu-guest-agent) ; "
@@ -1865,7 +1870,11 @@ private:
         }
     }
 
-    void Focus() override { SetFocus(Item(IdSnapshotName)); }
+    void Focus() override
+    {
+        ShowWindow(Item(IdCloneCancel), SW_HIDE); // Only during a full clone (ShowPage showed it).
+        SetFocus(Item(IdSnapshotName));
+    }
 
     // IDOK: take a snapshot (the window stays open).
     bool Commit() override
@@ -1896,6 +1905,7 @@ private:
     {
         if (id == IdSnapshotList && code == LBN_SELCHANGE) ShowSelection();
         if (id == IdSnapshotClone && code == BN_CLICKED) Clone();
+        if (id == IdCloneCancel && code == BN_CLICKED) cancel_ = true;
         if (id == IdSnapshotRestore && code == BN_CLICKED) {
             const auto* snapshot = SelectedSnapshot();
             if (snapshot == nullptr) return;
@@ -1945,14 +1955,23 @@ private:
         std::atomic_bool finished = false;
         bool ok = false;
         std::wstring message;
-        EnableWindow(window_, FALSE);
+        // Everything but "Annuler la copie" is disabled during the copy.
+        std::vector<HWND> disabled;
+        for (const int id : std::initializer_list<int>{IdSnapshotList, IdSnapshotName, IDOK, IdSnapshotRestore, IdSnapshotDelete, IdSnapshotClone, IDCANCEL}) {
+            if (HWND control = Item(id); control != nullptr && IsWindowEnabled(control)) {
+                EnableWindow(control, FALSE);
+                disabled.push_back(control);
+            }
+        }
+        cancel_ = false;
+        ShowWindow(Item(IdCloneCancel), SW_SHOW);
         SetMessage(L"Clonage en cours…", false);
         std::thread worker([&] {
             ok = CloneVm(vm_, stopped_, request, library_, vms_,
                          [&](std::uint64_t current, std::uint64_t count) {
                              done = current;
                              total = count;
-                             return true;
+                             return !cancel_.load(); // false: the copy stops and the clone folder is removed.
                          },
                          message);
             finished = true;
@@ -1962,17 +1981,30 @@ private:
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
             MSG pending{};
             while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) {
-                TranslateMessage(&pending);
-                DispatchMessageW(&pending);
+                if (!IsDialogMessageW(window_, &pending)) {
+                    TranslateMessage(&pending);
+                    DispatchMessageW(&pending);
+                }
             }
-            if (total != 0 && done * 100 / total != shown) {
+            if (Closing()) cancel_ = true; // Closing the window cancels the copy first.
+            if (cancel_) {
+                SetMessage(L"Annulation de la copie…", false);
+            } else if (total != 0 && done * 100 / total != shown) {
                 shown = done * 100 / total;
-                SetMessage(L"Copie du disque… " + std::to_wstring(shown) + L" %", false);
+                SetMessage(L"Copie du disque… " + std::to_wstring(shown) + L" % (" + std::to_wstring(done * 64 / 1024) + L" / " +
+                               std::to_wstring(total * 64 / 1024) + L" Mio examinés)",
+                           false);
             }
         }
         worker.join();
-        EnableWindow(window_, TRUE);
+        ShowWindow(Item(IdCloneCancel), SW_HIDE);
+        for (HWND control : disabled) EnableWindow(control, TRUE);
         SetForegroundWindow(window_);
+        if (!ok && cancel_) {
+            Reload(request.snapshot);
+            SetMessage(L"Clonage annulé : rien n'a été créé.", false);
+            return;
+        }
         if (ok) {
             cloned_ = true;
             changed_ = true; // A linked clone from the current state added a snapshot.
@@ -2099,6 +2131,7 @@ private:
     bool stopped_ = true;
     bool changed_ = false;
     bool cloned_ = false;
+    std::atomic_bool cancel_ = false; // "Annuler la copie" pressed during a full clone.
     const fs::path& library_;
     const std::vector<VmEntry>& vms_;
     std::vector<virtualiseur::whp::SnapshotStore::Snapshot> snapshots_;
