@@ -120,6 +120,28 @@ bool IdeController::CdromEjected() const noexcept
     return true;
 }
 
+bool IdeController::HasCdrom() const noexcept
+{
+    return std::any_of(channels_.begin(), channels_.end(), [](const Channel& channel) { return channel.kind == Kind::Cdrom; });
+}
+
+void IdeController::ChangeCdromMedia(virtualiseur::whp::Iso9660Image* image)
+{
+    for (auto& channel : channels_) {
+        if (channel.kind != Kind::Cdrom) continue;
+        const bool hadMedium = channel.iso != nullptr && !channel.ejected;
+        channel.iso = image;
+        channel.ejected = image == nullptr;
+        if (image != nullptr) {
+            channel.mediaEvent = 2; // NewMedia.
+            channel.unitAttention = true;
+        } else if (hadMedium) {
+            channel.mediaEvent = 3; // MediaRemoval.
+        }
+        return;
+    }
+}
+
 // --- Port dispatch -------------------------------------------------------------
 
 std::uint32_t IdeController::IoRead(std::uint16_t port, std::uint8_t size)
@@ -745,6 +767,13 @@ void IdeController::ExecutePacket(Channel& channel)
     const std::uint64_t totalBlocks = channel.iso != nullptr ? channel.iso->SizeBytes() / kCdBlockSize : 0;
     const bool mediumPresent = channel.iso != nullptr && !channel.ejected;
 
+    // After a host media change, the first command (except those that only
+    // report status) fails with UNIT ATTENTION / "not ready to ready change".
+    if (channel.unitAttention && opcode != 0x03 && opcode != 0x12 && opcode != 0x46 && opcode != 0x4A) {
+        channel.unitAttention = false;
+        return AtapiCheckCondition(channel, 0x06, 0x28);
+    }
+
     switch (opcode) {
     case 0x00: // TEST UNIT READY
         if (!mediumPresent) return AtapiCheckCondition(channel, 0x02, 0x3A);
@@ -885,9 +914,9 @@ void IdeController::ExecutePacket(Channel& channel)
             PutBe16(reply.data(), 6);
             reply[2] = 0x04;
             reply[3] = 0x10;
-            reply[4] = channel.mediaChanged ? 0x02 : 0x00;
+            reply[4] = channel.mediaEvent;
             reply[5] = mediumPresent ? 0x02 : 0x00;
-            channel.mediaChanged = false;
+            channel.mediaEvent = 0;
         } else {
             reply.assign(4, 0);
             PutBe16(reply.data(), 2);

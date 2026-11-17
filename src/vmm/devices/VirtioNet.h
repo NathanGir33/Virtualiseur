@@ -21,6 +21,14 @@ public:
               const std::array<std::uint8_t, 6>& mac);
 
     void SetLinkUp(bool up) noexcept { linkUp_ = up; }
+    // Device lock held: cable plugged or unplugged while the guest runs.
+    void ChangeLink(bool up)
+    {
+        if (linkUp_ == up) return;
+        linkUp_ = up;
+        if (!up) backlog_.clear();
+        SignalConfigChange();
+    }
     // Device lock held. Receive puts a frame in the RX ring (or the backlog)
     // without interrupting; FlushReceived interrupts the guest once for all
     // the frames received since the previous flush.

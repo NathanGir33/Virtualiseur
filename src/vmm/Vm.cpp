@@ -73,6 +73,12 @@ constexpr std::uint32_t kVirtioSerialGsi = 18;
 constexpr std::uint32_t kVirtioSoundGsi = 19;
 constexpr std::uint32_t kVirtioMmioBase = 0xFE000000;
 
+std::string PathUtf8(const std::filesystem::path& path)
+{
+    const auto text = path.u8string();
+    return std::string(text.begin(), text.end());
+}
+
 std::wstring WidenUtf8(const std::string& text)
 {
     if (text.empty()) return {};
@@ -239,7 +245,9 @@ void Vm::BuildDevices()
     pciBus_->Add(1, 1, ide.get());
     pciFunctions_.push_back(std::move(ide));
     if (disk_ && config_.diskBus == DiskBus::Ide) ide_->AttachDisk(0, &*disk_);
-    if (iso_) ide_->AttachCdrom(1, iso_.get());
+    // The CD-ROM drive is always there, empty or not, so a disc can be
+    // inserted while the VM runs.
+    ide_->AttachCdrom(1, iso_.get());
 
     const auto placement = [this, sink](std::uint8_t slot, std::uint32_t gsi) {
         return VirtioPlacement{ioBus_, mmioBus_, *sink, static_cast<std::uint16_t>(0xC000 + slot * 0x100),
@@ -287,7 +295,8 @@ void Vm::BuildDevices()
             VMM_WARN("Réseau indisponible (%s) : la carte réseau reste débranchée.", error.what());
             network_.reset();
         }
-        virtioNet_->SetLinkUp(network_ != nullptr);
+        virtioNet_->SetLinkUp(network_ != nullptr && config_.cableConnected);
+        if (network_ && !config_.cableConnected) VMM_INFO("Carte réseau : câble débranché.");
     }
     if (disk_ && config_.diskBus == DiskBus::Virtio) {
         auto blk = std::make_unique<VirtioBlk>(*memory_, placement(kVirtioBlkSlot, kVirtioBlkGsi), *disk_);
@@ -517,6 +526,68 @@ bool Vm::CdromEjected() const
 {
     const DeviceGuard guard(deviceLock_);
     return ide_ == nullptr || ide_->CdromEjected();
+}
+
+bool Vm::HasCdrom() const
+{
+    const DeviceGuard guard(deviceLock_);
+    return ide_ != nullptr && ide_->HasCdrom();
+}
+
+void Vm::ChangeCdrom(const std::filesystem::path& iso)
+{
+    // Open the new image before touching the drive: a bad file leaves the
+    // current disc in place.
+    auto image = iso.empty() ? nullptr : std::make_unique<virtualiseur::whp::Iso9660Image>(iso);
+    std::unique_ptr<virtualiseur::whp::Iso9660Image> previous;
+    {
+        const DeviceGuard guard(deviceLock_);
+        if (ide_ == nullptr || !ide_->HasCdrom()) throw std::runtime_error("Cette VM n'a pas de lecteur CD-ROM.");
+        ide_->ChangeCdromMedia(image.get());
+        previous = std::move(iso_);
+        iso_ = std::move(image);
+        config_.iso = iso;
+    }
+    if (iso.empty()) VMM_INFO("CD-ROM : disque éjecté depuis l'hôte.");
+    else VMM_INFO("CD-ROM : image %s insérée.", PathUtf8(iso).c_str());
+}
+
+std::filesystem::path Vm::CdromImage() const
+{
+    const DeviceGuard guard(deviceLock_);
+    return iso_ ? config_.iso : std::filesystem::path{};
+}
+
+bool Vm::CanConnectCable() const
+{
+    return virtioNet_ != nullptr && network_ != nullptr;
+}
+
+void Vm::SetCableConnected(bool connected)
+{
+    if (virtioNet_ == nullptr) return;
+    {
+        const DeviceGuard guard(deviceLock_);
+        if (config_.cableConnected == connected) return;
+        config_.cableConnected = connected;
+    }
+    {
+        const DeviceGuard guard(virtioNet_->Lock());
+        virtioNet_->ChangeLink(connected && network_ != nullptr);
+    }
+    VMM_INFO("Carte réseau : câble %s.", connected ? "branché" : "débranché");
+}
+
+bool Vm::CableConnected() const
+{
+    const DeviceGuard guard(deviceLock_);
+    return config_.cableConnected;
+}
+
+VmConfig Vm::CurrentConfig() const
+{
+    const DeviceGuard guard(deviceLock_);
+    return config_;
 }
 
 DisplaySnapshot Vm::Display() const

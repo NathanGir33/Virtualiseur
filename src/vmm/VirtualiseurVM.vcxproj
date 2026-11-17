@@ -57,7 +57,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>WinHvPlatform.lib;WinHvEmulation.lib;Ws2_32.lib;User32.lib;Gdi32.lib;d2d1.lib;opengl32.lib;windowscodecs.lib;ole32.lib;shell32.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>WinHvPlatform.lib;WinHvEmulation.lib;Ws2_32.lib;User32.lib;Gdi32.lib;d2d1.lib;opengl32.lib;windowscodecs.lib;ole32.lib;shell32.lib;comctl32.lib;comdlg32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(EnableSlirp)' == 'true'">

@@ -27,6 +27,11 @@ public:
     void AttachDisk(std::uint32_t channel, virtualiseur::whp::VirtualDisk* disk);
     void AttachCdrom(std::uint32_t channel, virtualiseur::whp::Iso9660Image* image);
     bool CdromEjected() const noexcept;
+    bool HasCdrom() const noexcept;
+    // Host-side media change (VM-wide lock held): inserts `image`, or ejects
+    // the disc when it is nullptr. The guest is told through a unit attention
+    // and a media event, as with a real drive.
+    void ChangeCdromMedia(virtualiseur::whp::Iso9660Image* image);
 
     std::uint32_t IoRead(std::uint16_t port, std::uint8_t size) override;
     void IoWrite(std::uint16_t port, std::uint8_t size, std::uint32_t value) override;
@@ -63,7 +68,8 @@ private:
         std::uint8_t senseKey = 0;
         std::uint8_t asc = 0;
         bool ejected = false;
-        bool mediaChanged = false;
+        std::uint8_t mediaEvent = 0;  // Pending GET EVENT STATUS media event (2 new, 3 removed).
+        bool unitAttention = false;   // Next command fails with "medium may have changed".
 
         // Bus master registers.
         std::uint8_t bmCommand = 0;

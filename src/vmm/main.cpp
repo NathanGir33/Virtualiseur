@@ -89,6 +89,12 @@ std::uint64_t ParseNumber(const std::string& text, const char* what)
     }
 }
 
+std::string PathUtf8(const std::filesystem::path& path)
+{
+    const auto text = path.u8string();
+    return std::string(text.begin(), text.end());
+}
+
 std::filesystem::path Utf8Path(const std::string& text)
 {
     if (text.empty()) return {};
@@ -371,7 +377,7 @@ void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
         // so the manager never sees the VM disappear between two commands.
         const HANDLE next = connected ? createPipe() : INVALID_HANDLE_VALUE;
         if (connected && !stop.stop_requested()) {
-            char buffer[256] = {};
+            char buffer[2048] = {};
             DWORD read = 0;
             OVERLAPPED io{};
             io.hEvent = overlapped.hEvent;
@@ -395,6 +401,18 @@ void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
                 } else if (command == "stats") reply = vm->Statistics();
                 else if (command == "gpu-share on") vm->SetGpuShareAllowed(true);
                 else if (command == "gpu-share off") vm->SetGpuShareAllowed(false);
+                else if (command == "cable on" || command == "cable off") {
+                    if (!vm->CanConnectCable()) reply = "no-network";
+                    else vm->SetCableConnected(command == "cable on");
+                } else if (command == "cable") reply = vm->CableConnected() ? "on" : "off";
+                else if (command == "cdrom") reply = vm->CdromImage().empty() ? "empty" : PathUtf8(vm->CdromImage());
+                else if (command == "cdrom-eject" || command.rfind("cdrom-insert ", 0) == 0) {
+                    try {
+                        vm->ChangeCdrom(command == "cdrom-eject" ? std::filesystem::path{} : Utf8Path(command.substr(13)));
+                    } catch (const std::exception& error) {
+                        reply = std::string("error: ") + error.what();
+                    }
+                }
                 else reply = "unknown-command";
                 DWORD written = 0;
                 OVERLAPPED wio{};
@@ -567,6 +585,7 @@ int wmain(int argc, wchar_t** argv)
             const auto reason = vm->Wait();
             VMM_INFO("Statistiques: %s", vm->Statistics().c_str());
             slot.Set(nullptr);
+            config = vm->CurrentConfig(); // Keeps the ISO and cable changed while running.
             vm.reset();
             if (reason == VmExit::Reset && !shuttingDown.load()) {
                 VMM_INFO("Redémarrage de la machine virtuelle.");

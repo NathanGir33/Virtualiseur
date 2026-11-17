@@ -38,7 +38,7 @@ Moniteur de machine virtuelle de Virtualiseur. Il crée une partition WHP, y pla
 | i8042 PS/2 | 0x60/0x64, IRQ 1 et 12 | clavier MF2 (scancodes set 1), souris IntelliMouse |
 | ACPI PM | 0x600-0x60B, SCI GSI 9 | PM1 événement/contrôle, timer PM 32 bits, bouton power, S5 |
 | Bus PCI | 0xCF8-0xCFF | mécanisme #1 ; reset système via 0xCF9 |
-| 00:01.1 PIIX3 IDE | 0x1F0/0x170, IRQ 14/15, BMDMA | disque ATA LBA48 et CD-ROM ATAPI, PIO + DMA multimot |
+| 00:01.1 PIIX3 IDE | 0x1F0/0x170, IRQ 14/15, BMDMA | disque ATA LBA48 et CD-ROM ATAPI (toujours présent, média changeable à chaud), PIO + DMA multimot |
 | 00:03.0 virtio-net | 1AF4:1041, GSI 11 sans MSI-X | MAC configurable (`--mac`) ; NAT, pont, réseau interne, privé hôte (`--net`) ; file d'attente RX |
 | 00:04.0 virtio-blk | 1AF4:1042, GSI 10 sans MSI-X | thread d'E/S réveillé directement par le doorbell, flush, GET_ID |
 | 00:05.0 virtio-gpu | BAR2 mém. = framebuffer, GSI 16 sans MSI-X | classe VGA ; 2D, plan curseur, redimensionnement à chaud |
@@ -68,7 +68,7 @@ virtio-gpu est déclarée en classe VGA, avec un BAR mémoire posé sur le frame
 - `bridged` : `BridgeNetworkBackend` capture et injecte les trames avec Npcap (`System32\Npcap\wpcap.dll`, chargée dynamiquement), sur deux poignées (réception, émission). Sur Ethernet, la capture est en mode promiscuité, filtrée par BPF sur la MAC de l'invité et la diffusion. Sur Wi-Fi, un point d'accès n'accepte que la MAC associée : les trames sortent avec la MAC de l'hôte, l'ARP est réécrit, le DHCP demande une réponse en diffusion, et les trames entrantes pour l'IPv4 apprise de l'invité lui sont rendues ; l'IPv6 n'est pas transmise. Certains pilotes Wi-Fi refusent toute injection : le journal le signale.
 - `internal` : `InternalNetworkBackend`. Chaque VMM rejoint un groupe multicast UDP sur l'interface de bouclage (port dérivé du nom du réseau). Chaque datagramme porte une étiquette et une trame Ethernet ; chacun garde les trames pour sa MAC et la diffusion.
 
-Si un mode ne peut pas démarrer (Npcap absent, carte introuvable), la carte reste présente mais câble débranché.
+Si un mode ne peut pas démarrer (Npcap absent, carte introuvable), la carte reste présente mais câble débranché. Le câble se branche et se débranche aussi pendant l'exécution (menu Périphériques, commande de tube `cable on|off`) : virtio-net change l'état du lien (`VIRTIO_NET_F_STATUS`) et envoie une interruption de changement de configuration, l'invité voit `NO-CARRIER`.
 
 **Affichage** : `ui/DisplayWindow` demande à l'invité la taille de la fenêtre, après une pause de 250 ms pendant un glissement et de 60 ms sinon (agrandissement, ancrage, plein écran). Il le fait aussi dès que le pilote virtio-gpu prend l'écran. Le plein écran (Ctrl droit + F, `--fullscreen`) occupe le moniteur de la fenêtre ; une barre non activante en haut de l'écran donne le menu et la sortie.
 
@@ -101,4 +101,6 @@ VirtualiseurVM.exe ... --serial-log serial.log --serial-input input.txt --log vm
 VirtualiseurVM.exe ... --preseed docs\preseed-debian.cfg
 ```
 
-Le canal `\\.\pipe\Virtualiseur-<nom>` accepte `status`, `pause`, `resume`, `acpi-shutdown`, `poweroff`, `reset` et `stats`.
+Le canal `\\.\pipe\Virtualiseur-<nom>` accepte `status`, `pause`, `resume`, `acpi-shutdown`, `poweroff`, `reset`, `stats`, `cable on|off` (et `cable` pour lire l'état), `cdrom` (image insérée ou `empty`), `cdrom-insert <chemin.iso>` et `cdrom-eject`.
+
+**Changement de disque à chaud** : `IdeController::ChangeCdromMedia` remplace l'image puis signale le changement comme un vrai lecteur : la commande ATAPI suivante échoue en *UNIT ATTENTION* (clé 6, ASC 0x28) et `GET EVENT STATUS NOTIFICATION` rapporte *NewMedia* (2) ou *MediaRemoval* (3). Linux émet alors un uevent `DISK_MEDIA_CHANGE=1` (udisks/GNOME montent le disque). Le changement est conservé au redémarrage de l'invité (`Vm::CurrentConfig`), pas dans `vm.ini`.

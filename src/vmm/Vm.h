@@ -72,6 +72,7 @@ struct VmConfig {
     std::string bridgeAdapter;           // Host adapter for NetworkMode::Bridged (empty: first connected).
     std::string internalNetwork = "intnet";
     std::vector<PortForward> portForwards; // NetworkMode::Nat and HostOnly.
+    bool cableConnected = true;          // Network cable plugged in (can change while running).
     bool fullscreen = false;             // Open the window in full screen.
     bool graphicalInstaller = false;
     bool serialConsole = false;   // Kernel console on ttyS0 too.
@@ -125,6 +126,17 @@ public:
     VmState State() const noexcept { return state_.load(); }
     const std::string& BootDescription() const noexcept { return bootDescription_; }
     bool CdromEjected() const;
+    // Hot changes (thread-safe). ChangeCdrom inserts an ISO (empty path:
+    // ejects) and throws if the image cannot be read. They are kept across
+    // guest resets through CurrentConfig().
+    bool HasCdrom() const;
+    void ChangeCdrom(const std::filesystem::path& iso);
+    std::filesystem::path CdromImage() const;
+    // False when the VM has no network card or its backend failed to start.
+    bool CanConnectCable() const;
+    void SetCableConnected(bool connected);
+    bool CableConnected() const;
+    VmConfig CurrentConfig() const;
     DisplaySnapshot Display() const;
     // Adds the boot framebuffer rows changed since the previous call.
     void FramebufferDirtyRows(DirtyRows& rows) const

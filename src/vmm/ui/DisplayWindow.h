@@ -103,6 +103,9 @@ private:
     void PaintText(HDC dc, const RECT& client, const DisplaySnapshot& snapshot);
     RECT FitRect(const RECT& client, std::uint32_t width, std::uint32_t height) const;
     void UpdateTitle();
+    // CD-ROM and network cable items (read from the VM when a menu opens).
+    void UpdateDeviceMenu();
+    void ChooseCdromImage(Vm& vm);
     void OnKey(WPARAM wParam, LPARAM lParam, bool released);
     void SendScanCode(std::uint8_t code);
     void ReleaseAllKeys();

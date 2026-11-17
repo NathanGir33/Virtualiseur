@@ -1,6 +1,7 @@
 #include "DisplayWindow.h"
 
 #include <commctrl.h>
+#include <commdlg.h>
 
 #include <algorithm>
 #include <array>
@@ -32,6 +33,9 @@ enum MenuId : UINT {
     kMenuHelp = 301,
     kMenuMute = 401,
     kMenuCaptureKeyboard,
+    kMenuCdromInsert,
+    kMenuCdromEject,
+    kMenuCable,
 };
 
 // Set-1 scan codes (all E0-prefixed) of the keys Windows reports by virtual
@@ -122,6 +126,12 @@ DisplayWindow::DisplayWindow(std::wstring vmName, VmSlot& slot, std::uint32_t wi
     AppendMenuW(menu_, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&Affichage");
     HMENU devices = CreatePopupMenu();
     AppendMenuW(devices, MF_STRING, kMenuMute, L"&Couper le son");
+    AppendMenuW(devices, MF_SEPARATOR, 0, nullptr);
+    HMENU cdrom = CreatePopupMenu();
+    AppendMenuW(cdrom, MF_STRING, kMenuCdromInsert, L"&Choisir une image ISO...");
+    AppendMenuW(cdrom, MF_STRING, kMenuCdromEject, L"Éjecter le disque");
+    AppendMenuW(devices, MF_POPUP, reinterpret_cast<UINT_PTR>(cdrom), L"&Lecteur optique");
+    AppendMenuW(devices, MF_STRING, kMenuCable, L"Câble &réseau branché");
     AppendMenuW(devices, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(devices, MF_STRING, kMenuCaptureKeyboard,
                 L"Capturer le &clavier (touche Windows, Alt+Tab, touches multimédia)");
@@ -878,6 +888,9 @@ LRESULT DisplayWindow::Handle(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_ENTERMENULOOP:
         inMenu_ = true;
         return 0;
+    case WM_INITMENUPOPUP:
+        UpdateDeviceMenu();
+        return 0;
     case WM_EXITMENULOOP:
         inMenu_ = false;
         return 0;
@@ -1610,6 +1623,48 @@ void DisplayWindow::ResizeToGuest()
     lastClientSize_ = {client.right, client.bottom};
 }
 
+void DisplayWindow::UpdateDeviceMenu()
+{
+    const auto vm = slot_.Get();
+    const bool hasCdrom = vm && vm->HasCdrom();
+    const auto image = hasCdrom ? vm->CdromImage() : std::filesystem::path{};
+    const std::wstring eject = image.empty() ? L"Lecteur vide" : L"Éjecter « " + image.filename().wstring() + L" »";
+    ModifyMenuW(menu_, kMenuCdromEject, MF_BYCOMMAND | MF_STRING, kMenuCdromEject, eject.c_str());
+    EnableMenuItem(menu_, kMenuCdromInsert, MF_BYCOMMAND | (hasCdrom ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu_, kMenuCdromEject, MF_BYCOMMAND | (!image.empty() ? MF_ENABLED : MF_GRAYED));
+    const bool canConnect = vm && vm->CanConnectCable();
+    EnableMenuItem(menu_, kMenuCable, MF_BYCOMMAND | (canConnect ? MF_ENABLED : MF_GRAYED));
+    CheckMenuItem(menu_, kMenuCable, MF_BYCOMMAND | (canConnect && vm->CableConnected() ? MF_CHECKED : MF_UNCHECKED));
+}
+
+void DisplayWindow::ChooseCdromImage(Vm& vm)
+{
+    std::wstring file(MAX_PATH * 4, L'\0');
+    const auto current = vm.CdromImage();
+    const std::wstring folder = current.empty() ? std::wstring{} : current.parent_path().wstring();
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = window_;
+    dialog.lpstrFilter = L"Images de disque (*.iso)\0*.iso\0Tous les fichiers (*.*)\0*.*\0";
+    dialog.lpstrFile = file.data();
+    dialog.nMaxFile = static_cast<DWORD>(file.size());
+    dialog.lpstrInitialDir = folder.empty() ? nullptr : folder.c_str();
+    dialog.lpstrTitle = L"Insérer une image ISO dans le lecteur optique";
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&dialog)) return;
+    file.resize(wcslen(file.c_str()));
+    try {
+        vm.ChangeCdrom(file);
+    } catch (const std::exception& error) {
+        const std::string text = error.what();
+        std::wstring message = L"Impossible d'insérer cette image : ";
+        const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+        std::wstring wide(static_cast<std::size_t>(length), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), length);
+        MessageBoxW(window_, (message + wide).c_str(), name_.c_str(), MB_ICONWARNING);
+    }
+}
+
 void DisplayWindow::OnCommand(UINT id)
 {
     const auto vm = slot_.Get();
@@ -1662,6 +1717,15 @@ void DisplayWindow::OnCommand(UINT id)
     case kMenuCaptureKeyboard:
         captureKeyboard_ = !captureKeyboard_;
         keyboardSuspended_ = false;
+        break;
+    case kMenuCdromInsert:
+        if (vm) ChooseCdromImage(*vm);
+        break;
+    case kMenuCdromEject:
+        if (vm) vm->ChangeCdrom({});
+        break;
+    case kMenuCable:
+        if (vm) vm->SetCableConnected(!vm->CableConnected());
         break;
     case kMenuHelp:
         MessageBoxW(window_,
