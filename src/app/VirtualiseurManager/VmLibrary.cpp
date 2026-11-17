@@ -138,6 +138,7 @@ std::optional<VmEntry> LoadEntry(const fs::path& directory)
         c.virtioGpu = gpu != L"none";
         c.gpu3d = gpu == L"virgl";
         c.audio = IniFlag(file, L"audio", true);
+        c.microphone = IniFlag(file, L"microphone", false);
         c.graphicalInstaller = IniRead(file, L"installer", L"text") == L"gtk";
         c.guestTools = IniFlag(file, L"guest_tools", true);
         c.preseed = IniRead(file, L"preseed");
@@ -295,6 +296,7 @@ void SaveConfig(const VmEntry& entry)
     put(L"resolution", c.resolution);
     put(L"gpu", !c.virtioGpu ? L"none" : c.gpu3d ? L"virgl" : L"virtio");
     put(L"audio", c.audio ? L"on" : L"off");
+    put(L"microphone", c.microphone ? L"on" : L"off");
     put(L"installer", c.graphicalInstaller ? L"gtk" : L"text");
     put(L"guest_tools", c.guestTools ? L"on" : L"off");
     put(L"preseed", c.preseed.wstring());
@@ -508,6 +510,7 @@ bool LaunchVm(VmEntry& vm, std::wstring& message)
                     L" --display gfx --resolution " + c.resolution +
                     L" --gpu " + gpu +
                     L" --audio " + (c.audio ? L"on" : L"off") +
+                    L" --mic " + (c.microphone ? L"on" : L"off") +
                     L" --net " + NetworkModeKey(c.network) +
                     L" --installer " + (c.graphicalInstaller ? L"gtk" : L"text") +
                     L" --guest-tools " + (c.guestTools ? L"on" : L"off") +

@@ -99,5 +99,5 @@ Pour une console série interactive, lance le VMM dans un terminal avec `--displ
 - Sans pilote `virtio_gpu` dans l'invité, la résolution reste celle choisie au démarrage. Avec lui, redimensionner la fenêtre change la résolution.
 - La souris doit être capturée tant que l'invité n'a pas chargé `virtio_input` (installateur, démarrage).
 - L'installateur Debian graphique (GTK) repasse en mode texte (« Framebuffer not available »).
-- Son : lecture seulement (pas de micro), en 16 bits stéréo. Il faut un noyau invité avec `virtio_snd` (Linux 5.13 ou plus récent, présent dans Debian 12/13, Ubuntu, Fedora).
+- Son : lecture et enregistrement en 16 bits, 1-2 canaux. Le micro de Windows n'est donné à la VM que si on l'autorise (réglages Audio du gestionnaire ou menu Périphériques) ; sinon elle enregistre du silence. Il faut un noyau invité avec `virtio_snd` (Linux 5.13 ou plus récent, présent dans Debian 12/13, Ubuntu, Fedora).
 - Accélération 3D : OpenGL seulement (virgl), pas encore de Vulkan ni de décodage vidéo matériel. Sans les DLL virglrenderer à côté de `VirtualiseurVM.exe`, le bureau est rendu par les vCPU (llvmpipe). `vmm.log` indique « accélération 3D virgl active » quand elle fonctionne.

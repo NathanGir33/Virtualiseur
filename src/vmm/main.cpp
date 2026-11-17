@@ -209,6 +209,11 @@ Options ParseOptions(const std::vector<std::string>& args)
             if (value == "on") options.vm.audio = true;
             else if (value == "off") options.vm.audio = false;
             else throw std::invalid_argument("--audio attend on ou off.");
+        } else if (option == "--mic") {
+            const auto& value = next();
+            if (value == "on") options.vm.microphone = true;
+            else if (value == "off") options.vm.microphone = false;
+            else throw std::invalid_argument("--mic attend on ou off.");
         } else if (option == "--gpu-share") {
             const auto& value = next();
             if (value == "on") options.vm.gpuShare = true;
@@ -404,7 +409,11 @@ void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
                 else if (command == "cable on" || command == "cable off") {
                     if (!vm->CanConnectCable()) reply = "no-network";
                     else vm->SetCableConnected(command == "cable on");
-                } else if (command == "timesync") vm->SyncGuestTime("demande par le tube");
+                } else if (command == "mic on" || command == "mic off") {
+                    if (!vm->HasAudio()) reply = "no-audio";
+                    else vm->SetMicrophoneEnabled(command == "mic on");
+                } else if (command == "mic") reply = vm->MicrophoneEnabled() ? "on" : "off";
+                else if (command == "timesync") vm->SyncGuestTime("demande par le tube");
                 else if (command == "cable") reply = vm->CableConnected() ? "on" : "off";
                 else if (command == "cdrom") reply = vm->CdromImage().empty() ? "empty" : PathUtf8(vm->CdromImage());
                 else if (command == "cdrom-eject" || command.rfind("cdrom-insert ", 0) == 0) {

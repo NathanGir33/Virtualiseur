@@ -10,6 +10,8 @@
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
 
+#include "WasapiCommon.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -23,10 +25,9 @@ namespace vmm {
 namespace {
 
 using Microsoft::WRL::ComPtr;
-
-// PKEY_Device_FriendlyName, defined here to avoid initguid.h side effects.
-constexpr PROPERTYKEY kDeviceFriendlyName{
-    {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+using audio::DeviceId;
+using audio::FriendlyName;
+using audio::Narrow;
 
 // Device buffer: large enough to ride out scheduling hiccups, small enough
 // to keep the guest's audio in sync with its video.
@@ -36,40 +37,6 @@ constexpr REFERENCE_TIME kBufferDuration = 60 * 10'000; // 60 ms, in 100 ns unit
 // small ALSA buffers (~50 ms) were emptied the moment playback started and
 // the guest saw an underrun right away, then again after every restart.
 constexpr std::uint32_t kLeadMilliseconds = 30;
-
-std::string Narrow(const std::wstring& text)
-{
-    if (text.empty()) return {};
-    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0,
-                                           nullptr, nullptr);
-    std::string result(static_cast<std::size_t>(length), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length, nullptr,
-                        nullptr);
-    return result;
-}
-
-std::wstring DeviceId(IMMDevice* device)
-{
-    LPWSTR id = nullptr;
-    if (device == nullptr || FAILED(device->GetId(&id)) || id == nullptr) return {};
-    std::wstring result(id);
-    CoTaskMemFree(id);
-    return result;
-}
-
-std::wstring FriendlyName(IMMDevice* device)
-{
-    ComPtr<IPropertyStore> properties;
-    if (FAILED(device->OpenPropertyStore(STGM_READ, &properties))) return {};
-    PROPVARIANT value;
-    PropVariantInit(&value);
-    std::wstring name;
-    if (SUCCEEDED(properties->GetValue(kDeviceFriendlyName, &value)) && value.vt == VT_LPWSTR && value.pwszVal != nullptr) {
-        name = value.pwszVal;
-    }
-    PropVariantClear(&value);
-    return name;
-}
 
 } // namespace
 

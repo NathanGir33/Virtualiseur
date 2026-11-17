@@ -85,6 +85,7 @@ struct VmConfig {
     std::filesystem::path preseed; // Debian preseed file injected as /preseed.cfg (ISO boot).
     bool rtcLocalTime = false;     // Hardware clock in local time (Windows) instead of UTC.
     bool audio = true;             // virtio-sound card played on the default Windows output.
+    bool microphone = false;       // Host microphone recorded by the guest (otherwise: silence).
     bool hyperv = true;            // Hyper-V enlightenments (reference TSC page, synthetic timers).
     bool gpuShare = true;          // virgl screen shown from a shared Direct3D texture (no readback).
 };
@@ -175,6 +176,9 @@ public:
     // Sound card (thread-safe). Muting keeps the guest playing, silently.
     bool HasAudio() const noexcept { return sound_ != nullptr; }
     void SetAudioMuted(bool muted);
+    // Host microphone given to the guest (kept across guest resets).
+    void SetMicrophoneEnabled(bool enabled);
+    bool MicrophoneEnabled() const;
 
     std::string Statistics() const;
 

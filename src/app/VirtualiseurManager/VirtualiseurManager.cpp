@@ -493,7 +493,8 @@ std::vector<DetailCard> BuildCards(const VmEntry& vm)
                       iso}});
     cards.push_back({ui::glyph::kAudio, L"Audio", kPageAudio,
                      c.audio ? std::vector<DetailRow>{{L"Contrôleur", L"virtio-sound"},
-                                                      {L"Sortie hôte", L"Périphérique par défaut de Windows"}}
+                                                      {L"Sortie hôte", L"Périphérique par défaut de Windows"},
+                                                      {L"Micro", c.microphone ? L"Micro de Windows" : L"Coupé (silence)"}}
                              : std::vector<DetailRow>{{L"Son", L"Désactivé", color::kSecondary}}});
     std::vector<DetailRow> network;
     switch (c.network) {

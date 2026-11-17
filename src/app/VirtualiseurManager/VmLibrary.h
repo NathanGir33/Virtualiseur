@@ -57,6 +57,7 @@ struct VmConfig {
     bool virtioGpu = true;
     bool gpu3d = true;
     bool audio = true;
+    bool microphone = false; // The guest may record the Windows microphone.
     bool graphicalInstaller = false;
     bool guestTools = true;
     fs::path preseed;

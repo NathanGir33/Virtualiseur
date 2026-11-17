@@ -46,6 +46,7 @@ enum ControlId : int {
     IdEject,
     IdIsoInfo,
     IdAudio,
+    IdMicrophone,
     IdNetwork,
     IdNetMode,
     IdInstaller,
@@ -877,11 +878,18 @@ private:
         AddStatic(kPageAudio, L"virtio-sound (pilote Linux virtio_snd)", kField, 115, kFieldWidth);
         AddLabel(kPageAudio, L"Sortie hôte :", kLeft, 140);
         AddStatic(kPageAudio, L"Périphérique audio par défaut de Windows (WASAPI)", kField, 145, kFieldWidth);
+        AddLabel(kPageAudio, L"Entrée hôte :", kLeft, 170);
+        AddStatic(kPageAudio, L"Micro par défaut de Windows (WASAPI)", kField, 175, kFieldWidth);
+        AddCheck(kPageAudio, IdMicrophone, L"Autoriser la machine à enregistrer avec le micro de Windows", kLeft, 210,
+                 kRight - kLeft);
+        SetChecked(IdMicrophone, c.microphone);
         AddStatic(kPageAudio,
                   L"Le son de la machine sort sur les haut-parleurs ou le casque choisis dans Windows, et suit "
                   L"automatiquement les changements de périphérique. Il se coupe à tout moment depuis le menu "
-                  L"« Périphériques » de la fenêtre de la machine, et apparaît dans le mélangeur de volume de Windows.",
-                  kLeft, 190, kRight - kLeft, 60, ui::Font().caption, color::kSecondary);
+                  L"« Périphériques » de la fenêtre de la machine, et apparaît dans le mélangeur de volume de Windows. "
+                  L"Sans l'autorisation du micro, la machine voit une entrée audio muette ; le micro de Windows n'est "
+                  L"ouvert que pendant qu'elle enregistre, et le même menu l'autorise ou le coupe en cours de route.",
+                  kLeft, 250, kRight - kLeft, 80, ui::Font().caption, color::kSecondary);
 
         // Réseau.
         AddCheck(kPageNetwork, IdNetwork, L"Activer la carte réseau (virtio-net)", kLeft, 64, kRight - kLeft);
@@ -1326,6 +1334,7 @@ private:
         }
         c.fullscreen = Checked(IdFullscreen);
         c.audio = Checked(IdAudio);
+        c.microphone = Checked(IdMicrophone);
         c.network = Checked(IdNetwork) ? SelectedMode() : NetworkMode::None;
         c.mac = TextOf(IdMac);
         if (!ValidMac(c.mac)) {

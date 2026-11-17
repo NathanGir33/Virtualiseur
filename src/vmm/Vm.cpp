@@ -360,7 +360,7 @@ void Vm::BuildDevices()
     if (config_.audio) {
         try {
             auto sound = std::make_unique<VirtioSound>(*memory_, placement(kVirtioSoundSlot, kVirtioSoundGsi),
-                                                       L"Virtualiseur — " + WidenUtf8(config_.name));
+                                                       L"Virtualiseur — " + WidenUtf8(config_.name), config_.microphone);
             sound_ = sound.get();
             pciBus_->Add(kVirtioSoundSlot, 0, sound.get());
             pciFunctions_.push_back(std::move(sound));
@@ -741,6 +741,20 @@ void Vm::SetAudioMuted(bool muted)
     if (sound_ != nullptr) sound_->SetMuted(muted);
 }
 
+void Vm::SetMicrophoneEnabled(bool enabled)
+{
+    {
+        const DeviceGuard guard(deviceLock_);
+        config_.microphone = enabled;
+    }
+    if (sound_ != nullptr) sound_->SetMicrophoneEnabled(enabled);
+}
+
+bool Vm::MicrophoneEnabled() const
+{
+    return sound_ != nullptr && sound_->MicrophoneEnabled();
+}
+
 bool Vm::SerialInput(std::uint8_t value)
 {
     const DeviceGuard guard(deviceLock_);
@@ -760,7 +774,7 @@ std::string Vm::Statistics() const
         text << " gpu_flush=" << virtioGpu_->Flushes();
         if (virtioGpu_->Accelerated()) text << " gpu_submit_3d=" << virtioGpu_->Submits();
     }
-    if (sound_ != nullptr) text << " audio_octets=" << sound_->PlayedBytes();
+    if (sound_ != nullptr) text << " audio_octets=" << sound_->PlayedBytes() << " micro_octets=" << sound_->CapturedBytes();
     if (qemuAgent_) {
         if (const auto offset = qemuAgent_->LastOffsetMs()) text << " ecart_horloge_ms=" << *offset;
         else text << " agent_qemu=" << (qemuAgent_->Connected() ? "connecte" : "absent");

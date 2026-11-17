@@ -36,6 +36,7 @@ enum MenuId : UINT {
     kMenuCdromInsert,
     kMenuCdromEject,
     kMenuCable,
+    kMenuMicrophone,
 };
 
 // Set-1 scan codes (all E0-prefixed) of the keys Windows reports by virtual
@@ -126,6 +127,7 @@ DisplayWindow::DisplayWindow(std::wstring vmName, VmSlot& slot, std::uint32_t wi
     AppendMenuW(menu_, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&Affichage");
     HMENU devices = CreatePopupMenu();
     AppendMenuW(devices, MF_STRING, kMenuMute, L"&Couper le son");
+    AppendMenuW(devices, MF_STRING, kMenuMicrophone, L"Autoriser le &micro de l'hôte");
     AppendMenuW(devices, MF_SEPARATOR, 0, nullptr);
     HMENU cdrom = CreatePopupMenu();
     AppendMenuW(cdrom, MF_STRING, kMenuCdromInsert, L"&Choisir une image ISO...");
@@ -1634,6 +1636,8 @@ void DisplayWindow::UpdateDeviceMenu()
     ModifyMenuW(menu_, kMenuCdromEject, MF_BYCOMMAND | MF_STRING, kMenuCdromEject, eject.c_str());
     EnableMenuItem(menu_, kMenuCdromInsert, MF_BYCOMMAND | (hasCdrom ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(menu_, kMenuCdromEject, MF_BYCOMMAND | (!image.empty() ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu_, kMenuMicrophone, MF_BYCOMMAND | (vm && vm->HasAudio() ? MF_ENABLED : MF_GRAYED));
+    CheckMenuItem(menu_, kMenuMicrophone, MF_BYCOMMAND | (vm && vm->MicrophoneEnabled() ? MF_CHECKED : MF_UNCHECKED));
     const bool canConnect = vm && vm->CanConnectCable();
     EnableMenuItem(menu_, kMenuCable, MF_BYCOMMAND | (canConnect ? MF_ENABLED : MF_GRAYED));
     CheckMenuItem(menu_, kMenuCable, MF_BYCOMMAND | (canConnect && vm->CableConnected() ? MF_CHECKED : MF_UNCHECKED));
@@ -1728,6 +1732,9 @@ void DisplayWindow::OnCommand(UINT id)
         break;
     case kMenuCable:
         if (vm) vm->SetCableConnected(!vm->CableConnected());
+        break;
+    case kMenuMicrophone:
+        if (vm) vm->SetMicrophoneEnabled(!vm->MicrophoneEnabled());
         break;
     case kMenuHelp:
         MessageBoxW(window_,

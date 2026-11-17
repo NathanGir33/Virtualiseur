@@ -29,10 +29,16 @@ constexpr std::uint32_t kStatusOk = 0x8000;
 constexpr std::uint32_t kStatusBadMessage = 0x8001;
 constexpr std::uint32_t kStatusNotSupported = 0x8002;
 
-constexpr std::uint32_t kStreamCount = 1;
+// Stream 0 plays, stream 1 records. Both share function node 0, so the
+// guest driver groups them in one ALSA PCM device (playback + capture).
+constexpr std::uint32_t kStreamCount = 2;
+constexpr std::uint32_t kPlaybackStream = 0;
+constexpr std::uint32_t kCaptureStream = 1;
 constexpr std::uint8_t kDirectionOutput = 0;
+constexpr std::uint8_t kDirectionInput = 1;
 constexpr std::uint8_t kFormatS16 = 5; // VIRTIO_SND_PCM_FMT_S16 (little endian).
 constexpr std::size_t kPcmInfoSize = 32;
+constexpr std::size_t kStatusSize = 8;  // virtio_snd_pcm_status.
 constexpr std::size_t kMaxRequest = 4096;
 constexpr std::size_t kMaxTransfer = 4u * 1024 * 1024;
 constexpr std::size_t kMaxPendingBytes = 16u * 1024 * 1024;
@@ -59,18 +65,24 @@ void Store(std::vector<std::uint8_t>& data, std::size_t offset, const void* valu
 
 } // namespace
 
-VirtioSound::VirtioSound(const GuestMemory& memory, const VirtioPlacement& placement, std::wstring sessionName)
+VirtioSound::VirtioSound(const GuestMemory& memory, const VirtioPlacement& placement, std::wstring sessionName,
+                         bool microphone)
     : VirtioModernDevice(25, 0x04, 0x01, memory, placement, 4)
 {
     output_ = std::make_unique<WasapiOutput>(std::move(sessionName), [this](std::uint8_t* destination, std::size_t bytes) {
         return Pull(destination, bytes);
     });
+    input_ = std::make_unique<WasapiInput>([this](const std::uint8_t* data, std::size_t bytes) {
+        PushCapture(data, bytes);
+    });
+    input_->SetEnabled(microphone);
 }
 
 VirtioSound::~VirtioSound()
 {
-    // Stop the audio thread (which calls Pull) while the device is still whole.
+    // Stop the audio threads (which call Pull and PushCapture) while the device is still whole.
     output_.reset();
+    input_.reset();
 }
 
 std::uint8_t VirtioSound::ReadDeviceConfig(std::uint32_t offset)
@@ -90,14 +102,23 @@ void VirtioSound::DeviceReset()
     // The rings are being reset: pending buffers are simply forgotten.
     pending_.clear();
     pendingBytes_ = 0;
+    capture_.clear();
     params_ = StreamParams{};
+    captureParams_ = StreamParams{};
     StopPlayback();
+    StopCapture();
 }
 
 void VirtioSound::StopPlayback()
 {
     running_ = false;
     if (output_) output_->Stop();
+}
+
+void VirtioSound::StopCapture()
+{
+    capturing_ = false;
+    if (input_) input_->Stop();
 }
 
 void VirtioSound::QueueNotify(std::uint16_t queue)
@@ -157,8 +178,7 @@ std::uint32_t VirtioSound::HandleControl(const std::vector<std::uint8_t>& reques
 {
     const auto code = Load32(request, 0);
     VMM_DEBUG("virtio-snd : requête 0x%x (%zu octets en attente).", code, pendingBytes_);
-    switch (code) {
-    case kPcmInfo: {
+    if (code == kPcmInfo) {
         // virtio_snd_query_info: hdr, start_id, count, size.
         if (request.size() < 16) return kStatusBadMessage;
         const auto start = Load32(request, 4);
@@ -166,7 +186,7 @@ std::uint32_t VirtioSound::HandleControl(const std::vector<std::uint8_t>& reques
         const auto size = Load32(request, 12);
         if (start > kStreamCount || count > kStreamCount - start || size == 0 || size > 1024) return kStatusBadMessage;
         if (!announced_) {
-            VMM_INFO("virtio-snd : le pilote invité a trouvé la sortie audio (16 bits, 1-2 canaux, 8-96 kHz).");
+            VMM_INFO("virtio-snd : le pilote invité a trouvé la sortie et l'entrée audio (16 bits, 1-2 canaux, 8-96 kHz).");
             announced_ = true;
         }
         payload.assign(static_cast<std::size_t>(count) * size, 0);
@@ -177,7 +197,7 @@ std::uint32_t VirtioSound::HandleControl(const std::vector<std::uint8_t>& reques
             const std::uint64_t formats = 1ull << kFormatS16;
             Store(info, 8, &formats, 8);
             Store(info, 16, &kSupportedRates, 8);
-            info[24] = kDirectionOutput;
+            info[24] = start + index == kCaptureStream ? kDirectionInput : kDirectionOutput;
             info[25] = 1;
             info[26] = 2;
             std::memcpy(payload.data() + static_cast<std::size_t>(index) * size, info.data(),
@@ -185,59 +205,81 @@ std::uint32_t VirtioSound::HandleControl(const std::vector<std::uint8_t>& reques
         }
         return kStatusOk;
     }
+    if (code == kJackInfo || code == kChmapInfo) return kStatusBadMessage; // No jacks, no channel maps advertised.
+    if (code < kPcmSetParams || code > kPcmStop) {
+        VMM_DEBUG("virtio-snd : requête 0x%x non prise en charge.", code);
+        return kStatusNotSupported;
+    }
+
+    // PCM stream requests: hdr, stream_id, ...
+    if (request.size() < 8) return kStatusBadMessage;
+    const auto stream = Load32(request, 4);
+    if (stream >= kStreamCount) return kStatusBadMessage;
+    const bool capture = stream == kCaptureStream;
+    auto& params = capture ? captureParams_ : params_;
+    switch (code) {
     case kPcmSetParams: {
         // virtio_snd_pcm_set_params: hdr, stream_id, buffer_bytes,
         // period_bytes, features, channels, format, rate, padding.
-        if (request.size() < 24 || Load32(request, 4) >= kStreamCount) return kStatusBadMessage;
+        if (request.size() < 24) return kStatusBadMessage;
         const auto channels = request[20];
         const auto format = request[21];
         const auto rate = request[22];
         if (channels < 1 || channels > 2 || format != kFormatS16 || rate >= kRates.size() ||
             (kSupportedRates & (1ull << rate)) == 0) {
-            VMM_WARN("virtio-snd : paramètres refusés (format %u, fréquence %u, %u canaux).", format, rate, channels);
+            VMM_WARN("virtio-snd : paramètres refusés (flux %u, format %u, fréquence %u, %u canaux).", stream, format,
+                     rate, channels);
             return kStatusNotSupported;
         }
-        params_.set = true;
-        params_.bufferBytes = Load32(request, 8);
-        params_.periodBytes = Load32(request, 12);
-        params_.channels = channels;
-        params_.format = format;
-        params_.rate = rate;
+        params.set = true;
+        params.bufferBytes = Load32(request, 8);
+        params.periodBytes = Load32(request, 12);
+        params.channels = channels;
+        params.format = format;
+        params.rate = rate;
         return kStatusOk;
     }
     case kPcmPrepare:
-        if (request.size() < 8 || Load32(request, 4) >= kStreamCount) return kStatusBadMessage;
-        if (!params_.set) return kStatusBadMessage;
+        if (!params.set) return kStatusBadMessage;
         // Open the host device now: START must play at once (see WasapiOutput::Prepare).
-        if (output_) output_->Prepare(kRates[params_.rate], params_.channels);
+        if (!capture && output_) output_->Prepare(kRates[params.rate], params.channels);
         return kStatusOk;
     case kPcmStart: {
-        if (request.size() < 8 || Load32(request, 4) >= kStreamCount || !params_.set) return kStatusBadMessage;
-        running_ = true;
-        const auto hertz = kRates[params_.rate];
-        if (hertz != lastRate_ || params_.channels != lastChannels_) {
-            VMM_INFO("virtio-snd : lecture %u Hz, %u %s, 16 bits.", hertz, params_.channels,
-                     params_.channels > 1 ? "canaux" : "canal");
-            lastRate_ = hertz;
-            lastChannels_ = params_.channels;
+        if (!params.set) return kStatusBadMessage;
+        const auto hertz = kRates[params.rate];
+        if (capture) {
+            capturing_ = true;
+            VMM_INFO("virtio-snd : enregistrement %u Hz, %u %s, 16 bits (micro de l'hôte %s).", hertz, params.channels,
+                     params.channels > 1 ? "canaux" : "canal", MicrophoneEnabled() ? "autorisé" : "coupé : silence");
+            if (input_) input_->Start(hertz, params.channels);
+            return kStatusOk;
         }
-        if (output_) output_->Play(hertz, params_.channels);
+        running_ = true;
+        if (hertz != lastRate_ || params.channels != lastChannels_) {
+            VMM_INFO("virtio-snd : lecture %u Hz, %u %s, 16 bits.", hertz, params.channels,
+                     params.channels > 1 ? "canaux" : "canal");
+            lastRate_ = hertz;
+            lastChannels_ = params.channels;
+        }
+        if (output_) output_->Play(hertz, params.channels);
         return kStatusOk;
     }
     case kPcmStop:
-        if (request.size() < 8 || Load32(request, 4) >= kStreamCount) return kStatusBadMessage;
-        StopPlayback(); // Queued buffers wait for START (pause) or RELEASE.
+        // Queued buffers wait for START (pause) or RELEASE.
+        if (capture) StopCapture();
+        else StopPlayback();
         return kStatusOk;
     case kPcmRelease:
-        if (request.size() < 8 || Load32(request, 4) >= kStreamCount) return kStatusBadMessage;
-        StopPlayback();
-        ReleasePending(); // The driver waits for every pending transfer.
+        // The driver waits for every pending transfer.
+        if (capture) {
+            StopCapture();
+            ReleaseCapture();
+        } else {
+            StopPlayback();
+            ReleasePending();
+        }
         return kStatusOk;
-    case kJackInfo:
-    case kChmapInfo:
-        return kStatusBadMessage; // No jacks, no channel maps advertised.
     default:
-        VMM_DEBUG("virtio-snd : requête 0x%x non prise en charge.", code);
         return kStatusNotSupported;
     }
 }
@@ -288,24 +330,37 @@ void VirtioSound::ProcessTransmit()
 
 void VirtioSound::ProcessReceive()
 {
-    // No capture stream is advertised: hand any buffer straight back.
+    // virtio_snd_pcm_xfer (stream_id) readable; device-writable sample area
+    // followed by virtio_snd_pcm_status. Buffers wait in capture_ until the
+    // microphone fills them.
     auto& ring = queues_[kReceiveQueue];
     VirtQueue::Element element;
-    bool any = false;
+    bool rejected = false;
     while (ring.Pop(memory_, element)) {
-        CompleteTransfer(kReceiveQueue, element.head, element.writable, kStatusBadMessage);
-        any = true;
+        std::uint64_t total = 0;
+        for (const auto& buffer : element.writable) total += buffer.length;
+        if (total <= kStatusSize || total - kStatusSize > kMaxTransfer) {
+            CompleteTransfer(kReceiveQueue, element.head, element.writable, kStatusBadMessage);
+            rejected = true;
+            continue;
+        }
+        Capture capture;
+        capture.head = element.head;
+        capture.writable = element.writable;
+        capture.capacity = total - kStatusSize;
+        capture_.push_back(std::move(capture));
     }
-    if (any) SignalUsedBuffers(kReceiveQueue);
+    if (rejected) SignalUsedBuffers(kReceiveQueue);
 }
 
 void VirtioSound::CompleteTransfer(std::uint16_t queue, std::uint16_t head,
-                                   const std::vector<VirtQueue::Buffer>& writable, std::uint32_t status)
+                                   const std::vector<VirtQueue::Buffer>& writable, std::uint32_t status,
+                                   std::uint32_t dataBytes)
 {
     auto& ring = queues_[queue];
     if (!ring.Ready()) return;
     // virtio_snd_pcm_status {status, latency_bytes} is the last 8 writable bytes.
-    std::uint8_t data[8] = {};
+    std::uint8_t data[kStatusSize] = {};
     std::memcpy(data, &status, 4);
     std::uint64_t total = 0;
     for (const auto& buffer : writable) total += buffer.length;
@@ -323,7 +378,7 @@ void VirtioSound::CompleteTransfer(std::uint16_t queue, std::uint16_t head,
         if (count == 0 || !memory_.Write(address, data + written, count)) break;
         written += count;
     }
-    ring.Push(memory_, head, static_cast<std::uint32_t>(written));
+    ring.Push(memory_, head, static_cast<std::uint32_t>(dataBytes + written));
 }
 
 void VirtioSound::ReleasePending()
@@ -333,6 +388,17 @@ void VirtioSound::ReleasePending()
     pending_.clear();
     pendingBytes_ = 0;
     SignalUsedBuffers(kTransmitQueue);
+}
+
+void VirtioSound::ReleaseCapture()
+{
+    if (capture_.empty()) return;
+    for (const auto& capture : capture_) {
+        CompleteTransfer(kReceiveQueue, capture.head, capture.writable, kStatusOk,
+                         static_cast<std::uint32_t>(capture.filled));
+    }
+    capture_.clear();
+    SignalUsedBuffers(kReceiveQueue);
 }
 
 std::size_t VirtioSound::Pull(std::uint8_t* destination, std::size_t bytes)
@@ -360,6 +426,48 @@ std::size_t VirtioSound::Pull(std::uint8_t* destination, std::size_t bytes)
     }
     if (completed) SignalUsedBuffers(kTransmitQueue);
     return copied;
+}
+
+void VirtioSound::PushCapture(const std::uint8_t* data, std::size_t bytes)
+{
+    const DeviceGuard guard(lock_);
+    if (!capturing_) return;
+    bool completed = false;
+    while (bytes != 0 && !capture_.empty()) {
+        auto& front = capture_.front();
+        // Copy into the sample area, which may span several guest buffers.
+        auto count = (std::min<std::uint64_t>)(bytes, front.capacity - front.filled);
+        std::uint64_t offset = front.filled;
+        const std::uint8_t* source = data;
+        auto remaining = count;
+        for (const auto& buffer : front.writable) {
+            if (remaining == 0) break;
+            if (offset >= buffer.length) {
+                offset -= buffer.length;
+                continue;
+            }
+            const auto chunk = (std::min<std::uint64_t>)(remaining, buffer.length - offset);
+            if (!memory_.Write(buffer.address + offset, source, static_cast<std::size_t>(chunk))) {
+                remaining = 0;
+                break;
+            }
+            source += chunk;
+            remaining -= chunk;
+            offset = 0;
+        }
+        front.filled += count;
+        data += count;
+        bytes -= static_cast<std::size_t>(count);
+        capturedBytes_ += count;
+        if (front.filled == front.capacity) {
+            CompleteTransfer(kReceiveQueue, front.head, front.writable, kStatusOk,
+                             static_cast<std::uint32_t>(front.filled));
+            capture_.pop_front();
+            completed = true;
+        }
+    }
+    droppedCaptureBytes_ += bytes; // No buffer posted: the guest reads too slowly (overrun).
+    if (completed) SignalUsedBuffers(kReceiveQueue);
 }
 
 } // namespace vmm
