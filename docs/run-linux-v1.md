@@ -85,7 +85,9 @@ Ces fonctions passent par l'agent `spice-vdagent` du système invité.
 
 ## Dossiers partagés
 
-Dans *Configuration → Dossiers partagés*, choisis jusqu'à trois dossiers Windows, chacun avec un nom (tag) et, si besoin, en lecture seule. Dans la machine, monte-les par leur nom :
+Dans *Configuration → Dossiers partagés*, choisis jusqu'à trois dossiers Windows, chacun avec un nom (tag) et, si besoin, en lecture seule. Au démarrage de la machine, chaque dossier est **monté tout seul** sur `/media/<nom>` (visible dans le gestionnaire de fichiers) si le paquet `qemu-guest-agent` est installé dans l'invité : les outils invité de l'installateur Debian l'installent ; sur une machine existante, `sudo apt install qemu-guest-agent` une fois. Tous les utilisateurs de l'invité peuvent y écrire.
+
+Sans l'agent, monte-les par leur nom :
 
 ```sh
 sudo mkdir -p /mnt/partage
@@ -98,7 +100,7 @@ Pour un montage automatique au démarrage, ajoute à `/etc/fstab` :
 partage  /mnt/partage  9p  trans=virtio,version=9p2000.L,msize=524288,nofail  0  0
 ```
 
-La machine ne peut pas sortir du dossier choisi (même par une jonction NTFS). Les fichiers appartiennent à l'utilisateur qui les regarde ; `chmod` ne règle que la lecture seule. Liens symboliques, attributs étendus et verrous (`flock`) ne sont pas pris en charge ; les noms interdits par Windows (`a:b`, `NUL`...) sont refusés.
+Un dossier ajouté pendant que la machine tourne n'apparaît qu'au démarrage suivant. La machine ne peut pas sortir du dossier choisi (même par une jonction NTFS). Fichiers en `rwxrwxrwx` ; `chmod` ne règle que la lecture seule. Liens symboliques, attributs étendus et verrous (`flock`) ne sont pas pris en charge ; les noms interdits par Windows (`a:b`, `NUL`...) sont refusés.
 
 ## 7. Diagnostic
 

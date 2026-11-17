@@ -26,7 +26,8 @@ namespace vmm {
 // qid.path is the NTFS file index.
 //
 // Files keep Windows semantics where Linux has none: everything is owned by
-// the user who looks at it, mode 0755 (no write bits for files marked
+// the user who looks at it, mode 0777 so that every guest user may write
+// (0555 for files marked
 // read-only). Deleting and renaming use the POSIX flavour of NTFS (an open
 // file can be deleted or replaced).
 //

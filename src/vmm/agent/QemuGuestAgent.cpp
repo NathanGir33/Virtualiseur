@@ -41,6 +41,55 @@ std::string ErrorText(const std::string& reply)
     return std::regex_search(reply, match, pattern) ? match[1].str() : reply;
 }
 
+// Text as a JSON string literal.
+std::string JsonString(const std::string& text)
+{
+    std::string out = "\"";
+    for (const char c : text) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (c == '\n') {
+            out += "\\n";
+        } else {
+            out += c;
+        }
+    }
+    return out + "\"";
+}
+
+// "out-data"/"err-data" of guest-exec-status are base64.
+std::string Base64Decode(const std::string& text)
+{
+    std::string out;
+    unsigned buffer = 0;
+    int bits = 0;
+    for (const char c : text) {
+        int value = -1;
+        if (c >= 'A' && c <= 'Z') value = c - 'A';
+        else if (c >= 'a' && c <= 'z') value = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') value = c - '0' + 52;
+        else if (c == '+') value = 62;
+        else if (c == '/') value = 63;
+        else continue;
+        buffer = (buffer << 6) | static_cast<unsigned>(value);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += static_cast<char>((buffer >> bits) & 0xFF);
+        }
+    }
+    return out;
+}
+
+// "key": "value" (string) from a JSON reply, empty if absent.
+std::string StringField(const std::string& reply, const char* key)
+{
+    const std::regex pattern(std::string("\"") + key + R"re("\s*:\s*"([^"]*)")re");
+    std::smatch match;
+    return std::regex_search(reply, match, pattern) ? match[1].str() : std::string();
+}
+
 } // namespace
 
 QemuGuestAgent::QemuGuestAgent()
@@ -218,6 +267,76 @@ void QemuGuestAgent::CheckTime(const std::string& reason)
     }
 }
 
+bool QemuGuestAgent::Execute(const std::string& script, int& exitCode, std::string& errors)
+{
+    if (!synchronized_) {
+        synchronized_ = Synchronize();
+        if (!synchronized_) return false;
+    }
+    const auto started = Call(R"({"execute":"guest-exec","arguments":{"path":"/bin/sh","arg":["-c",)" + JsonString(script) +
+                                  R"(],"capture-output":true}})",
+                              kCallTimeout);
+    static const std::regex pidPattern(R"re("pid"\s*:\s*(\d+))re");
+    std::smatch match;
+    if (!started || !std::regex_search(*started, match, pidPattern)) {
+        if (started) errors = ErrorText(*started); // guest-exec disabled in the agent's configuration, for instance.
+        else synchronized_ = false;
+        return false;
+    }
+    const auto pid = match[1].str();
+    static const std::regex exitPattern(R"re("exitcode"\s*:\s*(-?\d+))re");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto status = Call(R"({"execute":"guest-exec-status","arguments":{"pid":)" + pid + "}}", kCallTimeout);
+        if (!status) {
+            synchronized_ = false;
+            return false;
+        }
+        if (status->find("\"exited\": true") != std::string::npos || status->find("\"exited\":true") != std::string::npos) {
+            exitCode = std::regex_search(*status, match, exitPattern) ? std::atoi(match[1].str().c_str()) : -1;
+            errors = Base64Decode(StringField(*status, "err-data"));
+            while (!errors.empty() && (errors.back() == '\n' || errors.back() == '\r')) errors.pop_back();
+            return true;
+        }
+        {
+            std::unique_lock lock(mutex_);
+            if (wake_.wait_for(lock, std::chrono::milliseconds(100), [this] { return stopping_ || !open_; })) return false;
+        }
+    }
+    errors = "délai dépassé";
+    return false;
+}
+
+void QemuGuestAgent::MountShares()
+{
+    // Tags are restricted to [A-Za-z0-9._-] (Virtio9p): safe in the command line.
+    for (const auto& tag : shares_) {
+        const auto directory = "/media/" + tag;
+        const auto script = "d=" + directory + "; if mountpoint -q \"$d\"; then exit 3; fi; mkdir -p \"$d\" && "
+                            "mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 " + tag + " \"$d\"";
+        int exitCode = -1;
+        std::string errors;
+        if (!Execute(script, exitCode, errors)) {
+            if (!errors.empty()) {
+                VMM_WARN("Dossier partagé « %s » non monté dans l'invité : l'agent refuse guest-exec (%s).", tag.c_str(),
+                         errors.c_str());
+            } else {
+                mountPending_ = true; // No answer: try again at the next check.
+                VMM_DEBUG("Agent QEMU : montage de « %s » reporté.", tag.c_str());
+            }
+            return;
+        }
+        if (exitCode == 0) {
+            VMM_INFO("Dossier partagé « %s » monté dans l'invité sur %s.", tag.c_str(), directory.c_str());
+        } else if (exitCode == 3) {
+            VMM_DEBUG("Dossier partagé « %s » déjà monté dans l'invité.", tag.c_str());
+        } else {
+            VMM_WARN("Dossier partagé « %s » non monté dans l'invité (code %d) : %s", tag.c_str(), exitCode,
+                     errors.empty() ? "pas de message" : errors.c_str());
+        }
+    }
+}
+
 void QemuGuestAgent::Worker()
 {
     SetThreadDescription(GetCurrentThread(), L"Agent QEMU");
@@ -229,12 +348,14 @@ void QemuGuestAgent::Worker()
         if (connectedChanged_) {
             connectedChanged_ = false;
             synchronized_ = false;
+            mountPending_ = open_ && !shares_.empty();
             if (open_) reason = "connexion de l'agent";
         }
         if (!pendingReason_.empty()) reason = std::exchange(pendingReason_, {});
         if (!open_ || suspended_) continue;
         lock.unlock();
         CheckTime(reason);
+        if (std::exchange(mountPending_, false)) MountShares(); // Sets it again if the agent did not answer.
         lock.lock();
     }
 }

@@ -686,7 +686,11 @@ void NinePServer::Dispatch(std::uint8_t type, Reader& in, Writer& out)
         const auto& fid = Lookup(in.U32());
         (void)in.U64(); // request_mask: everything is cheap to report.
         const auto info = fid.file != INVALID_HANDLE_VALUE ? InfoOf(fid.file) : Stat(HostPath(fid.components));
-        std::uint32_t mode = info.Directory() ? 0040755 : 0100755;
+        // 0777: every guest user may write. The guest caches one owner per inode
+        // (whoever looked first, usually root at mount time) and checks the
+        // permissions itself: with 0755, only that owner could write. Windows
+        // (folder ACLs, read-only attribute) stays the real limit.
+        std::uint32_t mode = info.Directory() ? 0040777 : 0100777;
         if ((info.attributes & FILE_ATTRIBUTE_READONLY) != 0 && !info.Directory()) mode &= ~0222u;
         out.U64(kGetattrAll);
         out.Qid(info);

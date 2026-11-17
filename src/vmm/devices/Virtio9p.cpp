@@ -16,7 +16,7 @@ Virtio9p::Virtio9p(const GuestMemory& memory, const VirtioPlacement& placement, 
                    const std::filesystem::path& folder, bool readOnly)
     : VirtioModernDevice(kVirtioType, 0x01, 0x80, memory, placement, 1), tag_(std::move(tag)), server_(folder, readOnly)
 {
-    if (tag_.empty() || tag_.size() > kMaxTagLength) throw std::invalid_argument("nom de partage vide ou trop long");
+    if (!ValidTag(tag_)) throw std::invalid_argument("nom de partage invalide (1 à 31 caractères : lettres, chiffres, . _ -, en commençant par une lettre ou un chiffre)");
     wake_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     worker_ = std::jthread([this](std::stop_token stop) { Worker(stop); });
 }

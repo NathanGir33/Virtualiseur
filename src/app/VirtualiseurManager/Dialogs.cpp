@@ -153,11 +153,11 @@ std::wstring BrowseFolder(HWND owner, const wchar_t* title, const std::wstring& 
 // Mount tag of a shared folder: what the guest types after "mount -t 9p".
 bool ValidTag(const std::wstring& tag, std::wstring& error)
 {
-    const bool ok = !tag.empty() && tag.size() <= 31 && std::all_of(tag.begin(), tag.end(), [](wchar_t c) {
+    const bool ok = !tag.empty() && tag.size() <= 31 && ((tag[0] >= L'a' && tag[0] <= L'z') || (tag[0] >= L'A' && tag[0] <= L'Z') || (tag[0] >= L'0' && tag[0] <= L'9')) && std::all_of(tag.begin(), tag.end(), [](wchar_t c) {
         return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || c == L'_' ||
                c == L'-' || c == L'.';
     });
-    if (!ok) error = L"Nom de partage : 1 à 31 caractères parmi lettres sans accent, chiffres, . _ et -.";
+    if (!ok) error = L"Nom de partage : 1 à 31 caractères parmi lettres sans accent, chiffres, . _ et -, en commençant par une lettre ou un chiffre.";
     return ok;
 }
 
@@ -1025,9 +1025,10 @@ private:
             SetChecked(IdShareReadOnly + index, share.readOnly);
         }
         AddStatic(kPageShares,
-                  L"Chaque dossier apparaît dans la machine comme un système de fichiers 9p, monté par son nom. "
-                  L"Par exemple, dans un terminal du système invité : sudo mkdir -p /mnt/partage puis "
-                  L"sudo mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 partage /mnt/partage. "
+                  L"Au démarrage, chaque dossier est monté tout seul dans la machine sur /media/<nom> "
+                  L"(il apparaît dans le gestionnaire de fichiers), si le paquet qemu-guest-agent y est installé : "
+                  L"les outils invité de l'installateur Debian le mettent, sinon sudo apt install qemu-guest-agent. "
+                  L"Sans lui : sudo mount -t 9p -o trans=virtio,version=9p2000.L partage /mnt/partage. "
                   L"La machine ne peut pas sortir du dossier choisi ; liens symboliques et verrous de fichiers ne sont "
                   L"pas pris en charge. Effacer le chemin retire le partage.",
                   kLeft, 330, kRight - kLeft, 100, ui::Font().caption, color::kSecondary);

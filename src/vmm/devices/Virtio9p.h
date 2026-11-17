@@ -6,6 +6,7 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <cctype>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -23,6 +24,16 @@ namespace vmm {
 class Virtio9p final : public VirtioModernDevice {
 public:
     static constexpr std::size_t kMaxTagLength = 31;
+    // Letters, digits, . _ - (starting with a letter or digit): the tag also
+    // names the guest mount point and goes into the agent's mount command.
+    static bool ValidTag(const std::string& tag) noexcept
+    {
+        if (tag.empty() || tag.size() > kMaxTagLength || !std::isalnum(static_cast<unsigned char>(tag[0]))) return false;
+        for (const char c : tag) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '_' && c != '-') return false;
+        }
+        return true;
+    }
 
     // Throws if the folder cannot be shared.
     Virtio9p(const GuestMemory& memory, const VirtioPlacement& placement, std::string tag,

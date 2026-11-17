@@ -1,6 +1,7 @@
 #include <winsock2.h>
 
 #include "Vm.h"
+#include "devices/Virtio9p.h"
 #include "core/Log.h"
 #include "ui/DisplayWindow.h"
 
@@ -221,12 +222,9 @@ Options ParseOptions(const std::vector<std::string>& args)
                 share.readOnly = true;
                 path.resize(path.size() - 3);
             }
-            for (const char c : share.tag) {
-                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-' && c != '.') {
-                    throw std::invalid_argument("--share : le tag ne peut contenir que lettres, chiffres, . _ et -.");
-                }
+            if (!Virtio9p::ValidTag(share.tag)) {
+                throw std::invalid_argument("--share : tag de 1 à 31 caractères (lettres, chiffres, . _ -), commençant par une lettre ou un chiffre.");
             }
-            if (share.tag.size() > 31) throw std::invalid_argument("--share : tag de 31 caractères au plus.");
             share.path = Utf8Path(path);
             options.vm.shares.push_back(std::move(share));
         } else if (option == "--mic") {

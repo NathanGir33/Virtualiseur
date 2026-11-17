@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace vmm {
 
@@ -52,6 +53,9 @@ public:
     void RequestTimeSync(const char* reason);
     // Last measured offset (guest - host), in milliseconds, if any.
     std::optional<std::int64_t> LastOffsetMs() const;
+    // Before the VM starts: shared folders (virtio-9p tags) the agent mounts
+    // in the guest on /media/<tag> each time it connects (guest-exec).
+    void SetShares(std::vector<std::string> tags) { shares_ = std::move(tags); }
 
 private:
     void Worker();
@@ -60,6 +64,9 @@ private:
     std::optional<std::string> Call(const std::string& command, std::chrono::milliseconds timeout);
     bool Synchronize();
     void CheckTime(const std::string& reason);
+    void MountShares();
+    // Runs /bin/sh -c `script` in the guest; false if the agent refused or timed out.
+    bool Execute(const std::string& script, int& exitCode, std::string& errors);
     void Write(const std::string& text);
 
     DeviceLock* lock_ = nullptr; // The serial port's lock.
@@ -75,6 +82,8 @@ private:
     bool suspended_ = false;
     bool stopping_ = false;
     bool synchronized_ = false;  // A guest-sync handshake succeeded since the port opened.
+    bool mountPending_ = false;  // Shares to mount since the port opened.
+    std::vector<std::string> shares_;
     std::uint64_t nextSyncId_ = 0;
     std::optional<std::int64_t> lastOffsetMs_;
     std::thread worker_;

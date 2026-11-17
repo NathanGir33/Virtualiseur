@@ -373,6 +373,7 @@ void Vm::BuildDevices()
     }
 
     std::vector<PciInterruptRoute> shareRoutes;
+    std::vector<std::string> shareTags;
     for (std::size_t index = 0; index < config_.shares.size(); ++index) {
         const auto& share = config_.shares[index];
         if (index >= kMaxShares) {
@@ -383,12 +384,13 @@ void Vm::BuildDevices()
         const auto gsi = static_cast<std::uint32_t>(kShareGsi + index);
         try {
             auto device = std::make_unique<Virtio9p>(*memory_, placement(slot, gsi), share.tag, share.path, share.readOnly);
-            VMM_INFO("Dossier partagé « %s »%s : %s. Dans l'invité : mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 %s <dossier>",
-                     share.tag.c_str(), share.readOnly ? " (lecture seule)" : "", PathUtf8(share.path).c_str(), share.tag.c_str());
+            VMM_INFO("Dossier partagé « %s »%s : %s. Monté par qemu-guest-agent sur /media/%s, ou à la main : mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 %s <dossier>",
+                     share.tag.c_str(), share.readOnly ? " (lecture seule)" : "", PathUtf8(share.path).c_str(), share.tag.c_str(), share.tag.c_str());
             shares_.push_back(device.get());
             pciBus_->Add(slot, 0, device.get());
             pciFunctions_.push_back(std::move(device));
             shareRoutes.push_back({slot, static_cast<std::uint8_t>(gsi)});
+            shareTags.push_back(share.tag);
         } catch (const std::exception& error) {
             VMM_WARN("Dossier partagé « %s » (%s) indisponible : %s.", share.tag.c_str(), PathUtf8(share.path).c_str(), error.what());
         }
@@ -405,6 +407,8 @@ void Vm::BuildDevices()
                       {kVirtioSoundSlot, static_cast<std::uint8_t>(kVirtioSoundGsi)},
                       {kQemuAgentSlot, static_cast<std::uint8_t>(kQemuAgentGsi)}};
     acpi.pciRoutes.insert(acpi.pciRoutes.end(), shareRoutes.begin(), shareRoutes.end());
+    // qemu-guest-agent mounts them in the guest on /media/<tag> when it connects.
+    if (qemuAgent_) qemuAgent_->SetShares(std::move(shareTags));
     const auto rsdp = BuildAcpiTables(*memory_, acpi);
     (void)rsdp;
 }
