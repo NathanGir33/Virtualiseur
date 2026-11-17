@@ -16,6 +16,7 @@
 #include "Dialogs.h"
 #include "Ui.h"
 #include "VmLibrary.h"
+#include "DiskLayer.h"
 #include "DiskSnapshots.h"
 
 #include <algorithm>
@@ -243,6 +244,20 @@ bool Confirm(const std::wstring& title, const std::wstring& instruction, const s
     return SUCCEEDED(TaskDialogIndirect(&config, &pressed, nullptr, nullptr)) && pressed == IDOK;
 }
 
+void Inform(const std::wstring& title, const std::wstring& instruction, const std::wstring& content)
+{
+    TASKDIALOGCONFIG config{sizeof(config)};
+    config.hwndParent = g_window;
+    config.hInstance = g_instance;
+    config.dwFlags = TDF_POSITION_RELATIVE_TO_WINDOW | TDF_ALLOW_DIALOG_CANCELLATION;
+    config.dwCommonButtons = TDCBF_OK_BUTTON;
+    config.pszWindowTitle = title.c_str();
+    config.pszMainIcon = TD_INFORMATION_ICON;
+    config.pszMainInstruction = instruction.c_str();
+    config.pszContent = content.c_str();
+    (void)TaskDialogIndirect(&config, nullptr, nullptr, nullptr);
+}
+
 void StartVm()
 {
     auto* vm = Selected();
@@ -272,19 +287,30 @@ void NewVm()
     if (request.startNow) StartVm();
 }
 
+std::wstring LinkedCloneNames(const VmEntry& vm);
+
 void ApplySettings(VmEntry& vm, VmConfig config)
 {
     std::wstring notes;
     // Grow the raw disk first, while its path is still the current one.
     RefreshDiskInfo(vm);
     const auto wanted = static_cast<std::uint64_t>(config.diskGiB) * 1024 * 1024 * 1024;
-    if (config.disk == vm.config.disk && vm.diskExists && wanted > vm.diskBytes) {
+    const bool layered = vm.snapshotCount != 0 || virtualiseur::whp::LayerFile::IsLayer(vm.config.disk);
+    if (layered && config.disk == vm.config.disk && vm.diskExists && wanted > vm.diskBytes) {
+        notes += L" Disque non agrandi : ses couches d'instantanés (ou de clone lié) ont une taille fixe.";
+        config.diskGiB = static_cast<unsigned>(vm.diskBytes / (1024ull * 1024 * 1024));
+    } else if (config.disk == vm.config.disk && vm.diskExists && wanted > vm.diskBytes) {
         if (ExtendDisk(config.disk, wanted)) {
             notes += L" Disque agrandi à " + FormatBytes(wanted) + L" : agrandis la partition dans l'invité "
                      L"(par exemple avec GParted ou growpart).";
         } else {
             notes += L" Le disque n'a pas pu être agrandi.";
         }
+    }
+    if (config.name != vm.config.name && (!vm.config.cloneOf.empty() || !LinkedCloneNames(vm).empty())) {
+        // Linked clones find their source's layers by relative folder paths.
+        notes += L" Nom conservé : une machine liée à des clones (ou un clone lié) ne peut pas être renommée.";
+        config.name = vm.config.name;
     }
     if (config.name != vm.config.name && vm.directory.filename() == vm.config.name) {
         // The folder follows the name when it still matches the old one.
@@ -321,11 +347,29 @@ void OpenSnapshots()
 {
     auto* vm = Selected();
     if (vm == nullptr) return;
-    if (ShowSnapshotsDialog(g_window, *vm, vm->state == RunState::Stopped)) {
+    const auto name = vm->config.name;
+    const int result = ShowSnapshotsDialog(g_window, *vm, vm->state == RunState::Stopped, g_library, g_vms);
+    if ((result & kLibraryChanged) != 0) {
+        Reload(name); // The clone appears in the list.
+        PollStates();
+        SetStatus(L"Clone créé à partir de « " + name + L" ».");
+    } else if ((result & kSnapshotsChanged) != 0) {
         RefreshDiskInfo(*vm);
         InvalidateRect(g_details, nullptr, FALSE);
-        SetStatus(L"Instantanés de « " + vm->config.name + L" » mis à jour.");
+        SetStatus(L"Instantanés de « " + name + L" » mis à jour.");
     }
+}
+
+// Linked clones built on this machine's snapshots (still existing on disk).
+std::wstring LinkedCloneNames(const VmEntry& vm)
+{
+    std::wstring names;
+    try {
+        const virtualiseur::whp::SnapshotStore store(vm.config.disk);
+        for (const auto& clone : store.LinkedClones()) names += (names.empty() ? L"« " : L", « ") + clone.name + L" »";
+    } catch (const std::exception&) {
+    }
+    return names;
 }
 
 void DeleteVm()
@@ -334,6 +378,11 @@ void DeleteVm()
     if (vm == nullptr) return;
     if (vm->state != RunState::Stopped) {
         SetStatus(L"Éteins la machine avant de la supprimer.");
+        return;
+    }
+    if (const auto clones = LinkedCloneNames(*vm); !clones.empty()) {
+        Inform(L"Supprimer la machine", L"« " + vm->config.name + L" » a des clones liés",
+               L"Ces machines lisent son disque : " + clones + L". Supprime-les d'abord.");
         return;
     }
     RefreshDiskInfo(*vm);
@@ -352,6 +401,13 @@ void DeleteVm()
         fs::remove(vm->config.disk, error);
     }
     fs::remove_all(vm->directory, error);
+    if (!vm->config.cloneOf.empty() && !vm->config.uuid.empty()) {
+        // A linked clone: its source no longer has to keep its layers.
+        try {
+            virtualiseur::whp::SnapshotStore(vm->config.cloneOf).UnregisterClone(vm->config.uuid);
+        } catch (const std::exception&) {
+        }
+    }
     if (vm->process != nullptr) CloseHandle(vm->process);
     vm->process = nullptr;
     g_vms.erase(g_vms.begin() + g_selected);
@@ -1179,6 +1235,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         CoTaskMemFree(documents);
     } else {
         g_library = ExecutableDirectory() / L"VMs";
+    }
+    // --library <folder>: another machine library (portable use, tests).
+    int argumentCount = 0;
+    if (wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount)) {
+        for (int index = 1; index + 1 < argumentCount; ++index) {
+            if (std::wstring(arguments[index]) == L"--library") g_library = fs::absolute(arguments[index + 1]);
+        }
+        LocalFree(arguments);
     }
     g_settingsFile = g_library.parent_path() / L"manager.ini";
     std::error_code error;

@@ -10,6 +10,8 @@
 #include <shobjidl.h>
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <array>
 #include <cmath>
 #include <ctime>
@@ -32,6 +34,9 @@ enum ControlId : int {
     IdSnapshotName,
     IdSnapshotRestore,
     IdSnapshotDelete,
+    IdSnapshotClone,
+    IdCloneName,
+    IdCloneKind,
     IdPageTitle,
     IdMessage,
     IdName,
@@ -1712,10 +1717,80 @@ private:
 
 // --- Snapshots ---------------------------------------------------------------------------
 
+// Name and kind of a clone.
+class CloneDialog final : public Form {
+public:
+    CloneDialog(std::wstring origin, std::wstring suggestedName, CloneRequest& request)
+        : origin_(std::move(origin)), suggestedName_(std::move(suggestedName)), request_(request) {}
+
+private:
+    static constexpr int kWidth = 560;
+    static constexpr int kHeight = 330;
+    static constexpr int kLeft = 24;
+    static constexpr int kField = 150;
+    static constexpr int kRight = kWidth - 24;
+
+    void Build() override
+    {
+        AddStatic(-1, origin_, kLeft, 20, kRight - kLeft, 20, ui::Font().caption, color::kSecondary);
+        AddLabel(-1, L"Nom :", kLeft, 60, 120);
+        AddEdit(-1, IdCloneName, suggestedName_, kField, 58, kRight - kField);
+        AddLabel(-1, L"Type :", kLeft, 102, 120);
+        AddCombo(-1, IdCloneKind, {L"Clone complet (indépendant)", L"Clone lié (léger, dépend de la source)"}, kField, 100,
+                 kRight - kField);
+        SetComboIndex(IdCloneKind, 0);
+        AddStatic(-1, L"", kLeft, 142, kRight - kLeft, 76, ui::Font().caption, color::kSecondary, SS_LEFT, IdSnapshotDetail);
+        AddStatic(-1, L"", kLeft, kHeight - 86, kRight - kLeft, 34, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
+        AddButton(-1, IDOK, L"Cloner", kRight - 212, kHeight - 46, 100, 32, true);
+        AddButton(-1, IDCANCEL, L"Annuler", kRight - 100, kHeight - 46, 100, 32);
+        Explain();
+    }
+
+    void Focus() override
+    {
+        SetFocus(Item(IdCloneName));
+        SendMessageW(Item(IdCloneName), EM_SETSEL, 0, -1);
+    }
+
+    void Command(int id, int code) override
+    {
+        if (id == IdCloneKind && code == CBN_SELCHANGE) Explain();
+    }
+
+    void Explain()
+    {
+        SetText(IdSnapshotDetail,
+                ComboIndex(IdCloneKind) == 1
+                    ? L"Le clone ne stocke que ses propres modifications : il est créé tout de suite et prend peu de place, "
+                      L"mais il lit le disque de la machine source. Tant qu'il existe, la source ne peut être supprimée, "
+                      L"ni l'instantané dont il part."
+                    : L"Copie complète et indépendante du disque, sans l'historique des instantanés. Seuls les blocs "
+                      L"utilisés sont écrits ; la copie peut prendre un moment pour un gros disque.");
+    }
+
+    bool Commit() override
+    {
+        std::wstring error;
+        const auto name = TextOf(IdCloneName);
+        if (!ValidName(name, error)) {
+            Fail(-1, IdCloneName, error);
+            return false;
+        }
+        request_.name = name;
+        request_.linked = ComboIndex(IdCloneKind) == 1;
+        return true;
+    }
+
+    std::wstring origin_;
+    std::wstring suggestedName_;
+    CloneRequest& request_;
+};
+
 class SnapshotsDialog final : public Form {
 public:
-    SnapshotsDialog(const VmEntry& vm, bool stopped) : vm_(vm), stopped_(stopped) {}
-    bool Changed() const noexcept { return changed_; }
+    SnapshotsDialog(const VmEntry& vm, bool stopped, const fs::path& library, const std::vector<VmEntry>& vms)
+        : vm_(vm), stopped_(stopped), library_(library), vms_(vms) {}
+    int Result() const noexcept { return (changed_ ? kSnapshotsChanged : 0) | (cloned_ ? kLibraryChanged : 0); }
 
 private:
     static constexpr int kWidth = 640;
@@ -1737,6 +1812,7 @@ private:
         AddButton(-1, IDOK, L"Prendre", kRight - 140, 374, 140, 32, true);
         AddButton(-1, IdSnapshotRestore, L"Restaurer", kLeft, 420, 140);
         AddButton(-1, IdSnapshotDelete, L"Supprimer", kLeft + 150, 420, 140);
+        AddButton(-1, IdSnapshotClone, L"Cloner…", kLeft + 300, 420, 140);
         AddStatic(-1, L"", kLeft, kHeight - 84, kRight - kLeft, 34, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
         AddButton(-1, IDCANCEL, L"Fermer", kRight - 100, kHeight - 46, 100, 32);
         Reload(0);
@@ -1819,6 +1895,7 @@ private:
     void Command(int id, int code) override
     {
         if (id == IdSnapshotList && code == LBN_SELCHANGE) ShowSelection();
+        if (id == IdSnapshotClone && code == BN_CLICKED) Clone();
         if (id == IdSnapshotRestore && code == BN_CLICKED) {
             const auto* snapshot = SelectedSnapshot();
             if (snapshot == nullptr) return;
@@ -1847,6 +1924,64 @@ private:
                 SetMessage(L"Instantané « " + label + L" » supprimé.", false);
                 return 0u;
             });
+        }
+    }
+
+    // Clones the selected snapshot, or the current state.
+    void Clone()
+    {
+        const auto* snapshot = SelectedSnapshot();
+        CloneRequest request;
+        request.snapshot = snapshot != nullptr ? snapshot->id : 0;
+        const auto origin = snapshot != nullptr ? L"Depuis l'instantané « " + snapshot->name + L" » de « " + vm_.config.name + L" »."
+                                                : L"Depuis l'état actuel de « " + vm_.config.name + L" »" +
+                                                      (stopped_ ? L"." : L" (allumée : un instantané gelé est pris d'abord pour un clone lié).");
+        CloneDialog dialog(origin, vm_.config.name + L" - clone", request);
+        if (!dialog.Run(window_, L"Cloner « " + vm_.config.name + L" »", 560, 330)) return;
+
+        // The copy runs on a thread; this window keeps painting and shows the progress.
+        std::atomic<std::uint64_t> done = 0;
+        std::atomic<std::uint64_t> total = 0;
+        std::atomic_bool finished = false;
+        bool ok = false;
+        std::wstring message;
+        EnableWindow(window_, FALSE);
+        SetMessage(L"Clonage en cours…", false);
+        std::thread worker([&] {
+            ok = CloneVm(vm_, stopped_, request, library_, vms_,
+                         [&](std::uint64_t current, std::uint64_t count) {
+                             done = current;
+                             total = count;
+                             return true;
+                         },
+                         message);
+            finished = true;
+        });
+        std::uint64_t shown = ~0ull;
+        while (!finished) {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
+            MSG pending{};
+            while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&pending);
+                DispatchMessageW(&pending);
+            }
+            if (total != 0 && done * 100 / total != shown) {
+                shown = done * 100 / total;
+                SetMessage(L"Copie du disque… " + std::to_wstring(shown) + L" %", false);
+            }
+        }
+        worker.join();
+        EnableWindow(window_, TRUE);
+        SetForegroundWindow(window_);
+        if (ok) {
+            cloned_ = true;
+            changed_ = true; // A linked clone from the current state added a snapshot.
+            Reload(request.snapshot);
+            SetMessage(message, false);
+        } else {
+            Reload(request.snapshot);
+            SetMessage(message);
+            MessageBeep(MB_ICONWARNING);
         }
     }
 
@@ -1963,15 +2098,18 @@ private:
     const VmEntry& vm_;
     bool stopped_ = true;
     bool changed_ = false;
+    bool cloned_ = false;
+    const fs::path& library_;
+    const std::vector<VmEntry>& vms_;
     std::vector<virtualiseur::whp::SnapshotStore::Snapshot> snapshots_;
     std::vector<Row> rows_;
 };
 
-bool ShowSnapshotsDialog(HWND owner, const VmEntry& vm, bool stopped)
+int ShowSnapshotsDialog(HWND owner, const VmEntry& vm, bool stopped, const fs::path& library, const std::vector<VmEntry>& vms)
 {
-    SnapshotsDialog dialog(vm, stopped);
+    SnapshotsDialog dialog(vm, stopped, library, vms);
     dialog.Run(owner, vm.config.name + L" — Instantanés", 640, 540);
-    return dialog.Changed();
+    return dialog.Result();
 }
 
 bool ShowSettingsDialog(HWND owner, const VmEntry& vm, const std::vector<VmEntry>& library, VmConfig& config,

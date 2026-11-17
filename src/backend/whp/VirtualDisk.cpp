@@ -332,6 +332,91 @@ void VirtualDisk::PushLayer(const std::filesystem::path& newTop)
     path_ = newTop;
 }
 
+std::vector<std::uint64_t> VirtualDisk::DataBlocks() const
+{
+    const auto blockCount = (sizeBytes_ + LayerFile::kBlockSize - 1) / LayerFile::kBlockSize;
+    std::vector<bool> present(static_cast<std::size_t>(blockCount), false);
+    for (const auto& layer : layers_) {
+        for (const auto block : layer.AllocatedBlocks()) present[static_cast<std::size_t>(block)] = true;
+    }
+    // Allocated ranges of the raw base (a non-sparse file: one range, all of it).
+    FILE_ALLOCATED_RANGE_BUFFER query{};
+    query.FileOffset.QuadPart = 0;
+    query.Length.QuadPart = static_cast<LONGLONG>(sizeBytes_);
+    std::vector<FILE_ALLOCATED_RANGE_BUFFER> ranges(256);
+    for (;;) {
+        DWORD returned = 0;
+        const BOOL ok = DeviceIoControl(file_, FSCTL_QUERY_ALLOCATED_RANGES, &query, sizeof(query), ranges.data(),
+                                        static_cast<DWORD>(ranges.size() * sizeof(ranges[0])), &returned, nullptr);
+        const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+        if (!ok && error != ERROR_MORE_DATA) {
+            std::fill(present.begin(), present.end(), true); // Unknown layout: read everything.
+            break;
+        }
+        const auto count = returned / sizeof(ranges[0]);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto start = static_cast<std::uint64_t>(ranges[index].FileOffset.QuadPart);
+            const auto end = (std::min)(sizeBytes_, start + static_cast<std::uint64_t>(ranges[index].Length.QuadPart));
+            for (auto block = start / LayerFile::kBlockSize; block * LayerFile::kBlockSize < end; ++block) {
+                present[static_cast<std::size_t>(block)] = true;
+            }
+        }
+        if (ok || count == 0) break;
+        // ERROR_MORE_DATA: continue after the last range returned.
+        const auto& last = ranges[count - 1];
+        const auto next = last.FileOffset.QuadPart + last.Length.QuadPart;
+        query.Length.QuadPart -= next - query.FileOffset.QuadPart;
+        query.FileOffset.QuadPart = next;
+    }
+    std::vector<std::uint64_t> blocks;
+    for (std::size_t index = 0; index < present.size(); ++index) {
+        if (present[index]) blocks.push_back(index);
+    }
+    return blocks;
+}
+
+void VirtualDisk::Flatten(const std::filesystem::path& source, const std::filesystem::path& target,
+                          const std::function<bool(std::uint64_t, std::uint64_t)>& progress)
+{
+    // Read-only: the parent layers stay shareable with a running VM.
+    const auto disk = Open(source, true);
+    const HANDLE file = CreateFileW(target.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (file == INVALID_HANDLE_VALUE) ThrowLastError("CreateFileW(clone)");
+    try {
+        // Sparse before the size is set: the unwritten blocks never use space.
+        DWORD returned = 0;
+        if (!DeviceIoControl(file, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned, nullptr)) {
+            ThrowLastError("FSCTL_SET_SPARSE");
+        }
+        LARGE_INTEGER end{};
+        end.QuadPart = static_cast<LONGLONG>(disk.SizeBytes());
+        if (!SetFilePointerEx(file, end, nullptr, FILE_BEGIN) || !SetEndOfFile(file)) ThrowLastError("SetEndOfFile");
+
+        const auto blocks = disk.DataBlocks();
+        std::vector<std::byte> data(LayerFile::kBlockSize);
+        std::uint64_t done = 0;
+        for (const auto block : blocks) {
+            const auto offset = block * LayerFile::kBlockSize;
+            const auto length = static_cast<std::size_t>((std::min<std::uint64_t>)(LayerFile::kBlockSize, disk.SizeBytes() - offset));
+            const auto part = std::span(data).first(length);
+            disk.ReadSectors(offset / SectorSize, part);
+            const bool zero = std::all_of(part.begin(), part.end(), [](std::byte value) { return value == std::byte{0}; });
+            if (!zero) WriteAt(file, offset, part.data(), part.size());
+            if (++done % 64 == 0 && progress && !progress(done, blocks.size())) {
+                throw std::runtime_error("Clonage annulé.");
+            }
+        }
+        if (!FlushFileBuffers(file)) ThrowLastError("FlushFileBuffers");
+        if (progress) (void)progress(blocks.size(), blocks.size());
+        CloseHandle(file);
+    } catch (...) {
+        CloseHandle(file);
+        (void)DeleteFileW(target.c_str());
+        throw;
+    }
+}
+
 void VirtualDisk::ReadFromChain(std::size_t fromLayer, std::uint64_t block, std::uint32_t offset,
                                 std::span<std::byte> destination) const
 {

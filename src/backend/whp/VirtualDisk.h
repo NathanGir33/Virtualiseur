@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <shared_mutex>
 #include <span>
@@ -48,10 +49,19 @@ public:
     // parent it is) on top. In-flight I/O completes first; new I/O waits.
     void PushLayer(const std::filesystem::path& newTop);
 
+    // Full clone: writes what `source` (a raw image or a layer chain) shows
+    // into a new raw image `target`, created sparse (FSCTL_SET_SPARSE before
+    // it is extended); only non-zero 64 KiB blocks are written. `progress`
+    // (done, total blocks) returns false to cancel; the target is then deleted.
+    static void Flatten(const std::filesystem::path& source, const std::filesystem::path& target,
+                        const std::function<bool(std::uint64_t, std::uint64_t)>& progress);
+
 private:
     VirtualDisk(HANDLE file, std::filesystem::path path, std::uint64_t sizeBytes, bool readOnly) noexcept;
     void Close() noexcept;
     // Reads part of `block` from the first layer at or below `fromLayer` that has it, else from the base.
+    // Blocks that may hold data: allocated in a layer, or not a hole of the raw base.
+    std::vector<std::uint64_t> DataBlocks() const;
     void ReadFromChain(std::size_t fromLayer, std::uint64_t block, std::uint32_t offset, std::span<std::byte> destination) const;
 
     HANDLE file_ = INVALID_HANDLE_VALUE;

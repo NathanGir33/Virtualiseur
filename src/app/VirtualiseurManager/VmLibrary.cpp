@@ -3,7 +3,9 @@
 
 #include "VmLibrary.h"
 
+#include "DiskLayer.h"
 #include "DiskSnapshots.h"
+#include "VirtualDisk.h"
 
 #include <winioctl.h>
 
@@ -156,6 +158,8 @@ std::optional<VmEntry> LoadEntry(const fs::path& directory)
         c.rtcLocal = IniRead(file, L"rtc", L"utc") == L"local";
         c.os = IniRead(file, L"os");
         if (c.os.empty()) c.os = DetectOsFromIso(c.iso);
+        c.uuid = IniRead(file, L"uuid");
+        c.cloneOf = IniRead(file, L"clone_of");
         if (c.disk.empty()) c.disk = directory / L"disk.img";
         RefreshDiskInfo(entry);
         return entry;
@@ -318,6 +322,8 @@ void SaveConfig(const VmEntry& entry)
     put(L"preseed", c.preseed.wstring());
     put(L"boot", c.boot == BootOrder::Cdrom ? L"cdrom" : c.boot == BootOrder::Disk ? L"disk" : L"auto");
     put(L"rtc", c.rtcLocal ? L"local" : L"utc");
+    put(L"uuid", c.uuid);
+    put(L"clone_of", c.cloneOf.wstring());
     put(L"os", c.os);
 }
 
@@ -335,6 +341,7 @@ void RefreshDiskInfo(VmEntry& entry)
     }
     entry.diskExists = true;
     entry.diskBytes = (static_cast<std::uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+    if (const auto size = virtualiseur::whp::LayerFile::SizeOf(entry.config.disk); size != 0) entry.diskBytes = size; // A layer: its virtual size.
     DWORD high = 0;
     const DWORD low = GetCompressedFileSizeW(entry.config.disk.c_str(), &high);
     if (low != INVALID_FILE_SIZE || GetLastError() == NO_ERROR) {
@@ -664,6 +671,144 @@ bool NpcapAvailable()
     std::array<wchar_t, MAX_PATH> system{};
     GetSystemDirectoryW(system.data(), MAX_PATH);
     return PathExists(fs::path(system.data()) / L"Npcap" / L"wpcap.dll");
+}
+
+std::wstring NewUuid()
+{
+    GUID guid{};
+    if (FAILED(CoCreateGuid(&guid))) return {};
+    wchar_t text[40] = {};
+    StringFromGUID2(guid, text, 40); // {xxxxxxxx-...}
+    std::wstring uuid(text + 1, wcslen(text) - 2);
+    for (auto& c : uuid) c = static_cast<wchar_t>(std::towlower(c));
+    return uuid;
+}
+
+std::wstring UniqueMac(const std::vector<VmEntry>& vms)
+{
+    for (;;) {
+        auto mac = RandomMac();
+        if (std::none_of(vms.begin(), vms.end(), [&](const VmEntry& vm) { return _wcsicmp(vm.config.mac.c_str(), mac.c_str()) == 0; })) {
+            return mac;
+        }
+    }
+}
+
+namespace {
+
+std::string Utf8(const std::wstring& text)
+{
+    if (text.empty()) return {};
+    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length, nullptr, nullptr);
+    return result;
+}
+
+std::wstring FromUtf8(const std::string& text)
+{
+    if (text.empty()) return {};
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring result(static_cast<std::size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length);
+    return result;
+}
+
+} // namespace
+
+bool CloneVm(const VmEntry& source, bool sourceStopped, const CloneRequest& request, const fs::path& library,
+             const std::vector<VmEntry>& vms, const std::function<bool(std::uint64_t, std::uint64_t)>& progress,
+             std::wstring& message)
+{
+    using virtualiseur::whp::LayerFile;
+    using virtualiseur::whp::SnapshotStore;
+    const auto& name = request.name;
+    if (name.empty() || name.size() > 80 || name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos || name.back() == L'.') {
+        message = L"Nom invalide : évite les caractères \\ / : * ? \" < > | et le point final.";
+        return false;
+    }
+    const auto directory = library / name;
+    if (PathExists(directory) || std::any_of(vms.begin(), vms.end(), [&](const VmEntry& vm) {
+            return _wcsicmp(vm.config.name.c_str(), name.c_str()) == 0;
+        })) {
+        message = L"Une machine porte déjà ce nom.";
+        return false;
+    }
+    try {
+        const auto sourceFolder = source.config.disk.parent_path();
+        SnapshotStore store(source.config.disk);
+        fs::path state;          // What the clone starts from.
+        std::wstring pinned;     // Linked clone: the source's frozen layer.
+        if (request.snapshot != 0) {
+            const auto* snapshot = store.Find(request.snapshot);
+            if (snapshot == nullptr) throw std::runtime_error("Instantané introuvable.");
+            pinned = snapshot->layer;
+        } else if (request.linked) {
+            // A linked clone needs a frozen layer: snapshot the current state
+            // first (frozen through the VM when it runs).
+            const auto snapshotName = L"Clone " + name;
+            std::uint32_t id = 0;
+            if (sourceStopped) {
+                id = store.Take(snapshotName, L"");
+            } else {
+                const auto reply = SendCommand(source.config.name, ("snapshot-take " + Utf8(snapshotName)).c_str());
+                if (!reply || reply->rfind("ok ", 0) != 0) {
+                    message = L"Instantané de la machine source impossible : " +
+                              (reply ? FromUtf8(reply->rfind("error: ", 0) == 0 ? reply->substr(7) : *reply) : L"elle ne répond pas.");
+                    return false;
+                }
+                id = static_cast<std::uint32_t>(std::strtoul(reply->c_str() + 3, nullptr, 10));
+            }
+            store = SnapshotStore(source.config.disk);
+            const auto* snapshot = store.Find(id);
+            if (snapshot == nullptr) throw std::runtime_error("Instantané « Clone » introuvable.");
+            pinned = snapshot->layer;
+        } else {
+            if (!sourceStopped) {
+                message = L"Éteins la machine source, ou clone un de ses instantanés : son état actuel change pendant qu'elle tourne.";
+                return false;
+            }
+            state = store.CurrentLayer();
+        }
+        if (!pinned.empty()) state = sourceFolder / pinned;
+
+        VmEntry clone;
+        clone.directory = directory;
+        clone.config = source.config;
+        clone.config.name = name;
+        clone.config.mac = UniqueMac(vms); // Locally administered unicast, unique in the library.
+        clone.config.uuid = NewUuid();
+        clone.config.cloneOf.clear();
+        fs::create_directories(directory);
+        try {
+            if (request.linked) {
+                // A layer whose parent is the source's frozen layer, by relative path.
+                clone.config.disk = directory / L"disk.layer";
+                const auto parent = state.lexically_normal().lexically_relative(directory.lexically_normal());
+                if (parent.empty()) throw std::runtime_error("Chemin relatif vers la machine source impossible.");
+                LayerFile::Create(clone.config.disk, parent.wstring(), LayerFile::SizeOf(state));
+                clone.config.cloneOf = source.config.disk;
+                SaveConfig(clone);
+                store.RegisterClone({clone.config.uuid, name,
+                                     clone.config.disk.lexically_normal().lexically_relative(sourceFolder.lexically_normal()).wstring(),
+                                     pinned});
+                message = L"Clone lié « " + name + L" » créé : il dépend des instantanés de « " + source.config.name + L" ».";
+            } else {
+                clone.config.disk = directory / L"disk.img";
+                virtualiseur::whp::VirtualDisk::Flatten(state, clone.config.disk, progress);
+                SaveConfig(clone);
+                message = L"Clone complet « " + name + L" » créé.";
+            }
+        } catch (...) {
+            std::error_code ignored;
+            fs::remove_all(directory, ignored);
+            throw;
+        }
+        return true;
+    } catch (const std::exception& error) {
+        message = L"Clonage impossible : " + FromUtf8(error.what());
+        return false;
+    }
 }
 
 std::wstring RandomMac()

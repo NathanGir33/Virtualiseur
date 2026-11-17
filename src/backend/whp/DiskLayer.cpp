@@ -47,6 +47,20 @@ std::uint64_t FileSize(HANDLE file)
 
 } // namespace
 
+bool LayerFile::ValidParentName(const std::wstring& name)
+{
+    // A file of the same folder, or a relative path to another VM's folder
+    // (linked clone): never absolute, so a library can be moved as a whole.
+    if (name.empty() || name.size() > kMaxParentName) return false;
+    if (name.find(L':') != std::wstring::npos || name.front() == L'\\' || name.front() == L'/') return false;
+    return true;
+}
+
+bool LayerFile::IsExternal(const std::wstring& name)
+{
+    return name.find_first_of(L"\\/") != std::wstring::npos;
+}
+
 void ReadAt(HANDLE file, std::uint64_t offset, void* destination, std::size_t size)
 {
     auto* bytes = static_cast<std::uint8_t*>(destination);
@@ -133,10 +147,7 @@ std::uint64_t LayerFile::SizeOf(const std::filesystem::path& path)
 
 void LayerFile::Create(const std::filesystem::path& path, const std::wstring& parentName, std::uint64_t virtualSize)
 {
-    if (parentName.empty() || parentName.size() > kMaxParentName ||
-        parentName.find_first_of(L"\\/") != std::wstring::npos) {
-        throw std::invalid_argument("Nom de couche parente invalide.");
-    }
+    if (!ValidParentName(parentName)) throw std::invalid_argument("Nom de couche parente invalide.");
     if (virtualSize == 0 || virtualSize % 512 != 0) throw std::invalid_argument("Taille de disque invalide.");
     const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                                     FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -283,9 +294,7 @@ void LayerFile::Append(std::uint64_t block, std::span<const std::byte> data)
 void LayerFile::SetParent(const std::wstring& parentName)
 {
     if (!writable_) throw std::logic_error("Couche ouverte en lecture seule.");
-    if (parentName.empty() || parentName.size() > kMaxParentName || parentName.find_first_of(L"\\/") != std::wstring::npos) {
-        throw std::invalid_argument("Nom de couche parente invalide.");
-    }
+    if (!ValidParentName(parentName)) throw std::invalid_argument("Nom de couche parente invalide.");
     // Length and name live in the first header sector: one write.
     std::vector<std::uint8_t> block(kHeaderSize, 0);
     ReadAt(file_, 0, block.data(), block.size());

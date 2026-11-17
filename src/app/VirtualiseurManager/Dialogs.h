@@ -32,8 +32,10 @@ struct NewVmRequest {
 // "New virtual machine" window: name, ISO, hardware sliders and options.
 bool ShowNewVmDialog(HWND owner, const fs::path& library, const std::vector<VmEntry>& existing, NewVmRequest& request);
 
-// Disk snapshots of a machine: take (stopped), restore, delete. Returns true if
-// something changed.
-bool ShowSnapshotsDialog(HWND owner, const VmEntry& vm, bool stopped);
+// Disk snapshots of a machine: take (live through the VM when it runs),
+// restore, delete, clone. Returns kSnapshotsChanged | kLibraryChanged flags.
+inline constexpr int kSnapshotsChanged = 1;
+inline constexpr int kLibraryChanged = 2; // A clone was created.
+int ShowSnapshotsDialog(HWND owner, const VmEntry& vm, bool stopped, const fs::path& library, const std::vector<VmEntry>& vms);
 
 } // namespace manager

@@ -40,7 +40,12 @@ public:
     static std::wstring ParentOf(const std::filesystem::path& path);
     // Virtual size of a layer or raw image (0 if unreadable).
     static std::uint64_t SizeOf(const std::filesystem::path& path);
-    // Creates an empty layer over `parentName` (a file of the same folder).
+    // Parent reference: a file name of the same folder, or a relative path to
+    // another folder (linked clone, "..\Source\disk-2.layer"); never absolute.
+    static bool ValidParentName(const std::wstring& name);
+    // True for a parent in another folder (a linked clone's source).
+    static bool IsExternal(const std::wstring& name);
+    // Creates an empty layer over `parentName`, resolved from this layer's folder.
     static void Create(const std::filesystem::path& path, const std::wstring& parentName, std::uint64_t virtualSize);
     static LayerFile Open(const std::filesystem::path& path, bool writable);
 

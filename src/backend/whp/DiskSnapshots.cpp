@@ -102,6 +102,7 @@ void SnapshotStore::Load()
     if (!file) return;
     std::string line;
     Snapshot* section = nullptr;
+    LinkedClone* clone = nullptr;
     bool store = false;
     while (std::getline(file, line)) {
         while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
@@ -110,6 +111,11 @@ void SnapshotStore::Load()
             const auto name = line.substr(1, line.size() - 2);
             store = name == "store";
             section = nullptr;
+            clone = nullptr;
+            if (name.rfind("clone.", 0) == 0 && name.size() > 6) {
+                clones_.push_back(LinkedClone{FromUtf8(name.substr(6))});
+                clone = &clones_.back();
+            }
             if (name.rfind("snapshot.", 0) == 0) {
                 Snapshot snapshot;
                 snapshot.id = static_cast<std::uint32_t>(std::strtoul(name.c_str() + 9, nullptr, 10));
@@ -133,6 +139,10 @@ void SnapshotStore::Load()
             else if (key == "date") section->date = value;
             else if (key == "layer") section->layer = value;
             else if (key == "state") section->state = value;
+        } else if (clone != nullptr) {
+            if (key == "name") clone->name = value;
+            else if (key == "disk") clone->disk = value;
+            else if (key == "layer") clone->layer = value;
         }
     }
     // A snapshot without a usable layer cannot be restored: drop it.
@@ -157,6 +167,12 @@ void SnapshotStore::Save() const
              << "date=" << ToUtf8(snapshot.date) << "\n"
              << "layer=" << ToUtf8(snapshot.layer) << "\n"
              << "state=" << ToUtf8(snapshot.state) << "\n";
+    }
+    for (const auto& clone : LinkedClones()) { // Registrations of clones deleted by hand are dropped.
+        text << "\n[clone." << ToUtf8(clone.id) << "]\n"
+             << "name=" << ToUtf8(SingleLine(clone.name)) << "\n"
+             << "disk=" << ToUtf8(clone.disk) << "\n"
+             << "layer=" << ToUtf8(clone.layer) << "\n";
     }
     // Write a temporary file, then replace: the metadata is never half-written.
     const auto target = MetadataPath();
@@ -183,15 +199,23 @@ std::wstring SnapshotStore::NewLayerName()
     }
 }
 
+std::wstring SnapshotStore::OwnParent(const std::wstring& layer) const
+{
+    // Walks stay in this VM's folder: a linked clone's source layers belong
+    // to the source's store and are never touched from here.
+    auto parent = LayerFile::ParentOf(PathOf(layer));
+    return LayerFile::IsExternal(parent) ? std::wstring() : parent;
+}
+
 std::uint32_t SnapshotStore::SnapshotAbove(const std::wstring& layer) const
 {
     // Walk down from `layer`'s parent until a layer named by a snapshot.
-    auto current = LayerFile::ParentOf(PathOf(layer));
+    auto current = OwnParent(layer);
     for (int depth = 0; !current.empty() && depth < 4096; ++depth) {
         for (const auto& snapshot : snapshots_) {
             if (_wcsicmp(snapshot.layer.c_str(), current.c_str()) == 0) return snapshot.id;
         }
-        current = LayerFile::ParentOf(PathOf(current));
+        current = OwnParent(current);
     }
     return 0;
 }
@@ -219,7 +243,7 @@ std::vector<std::wstring> SnapshotStore::LiveLayers() const
         for (int depth = 0; !layer.empty() && depth < 4096; ++depth) {
             if (std::any_of(live.begin(), live.end(), [&](const std::wstring& known) { return _wcsicmp(known.c_str(), layer.c_str()) == 0; })) return;
             live.push_back(layer);
-            layer = LayerFile::ParentOf(PathOf(layer));
+            layer = OwnParent(layer);
         }
     };
     add(current_.empty() ? baseName_ : current_);
@@ -333,6 +357,33 @@ void SnapshotStore::AbortLive(const LiveTake& take)
     ComputeParents();
 }
 
+std::vector<SnapshotStore::LinkedClone> SnapshotStore::LinkedClones() const
+{
+    std::vector<LinkedClone> alive;
+    for (const auto& clone : clones_) {
+        // A clone whose disk is gone (folder deleted by hand) no longer
+        // depends on anything here.
+        std::error_code error;
+        if (!clone.disk.empty() && std::filesystem::exists(PathOf(clone.disk), error)) alive.push_back(clone);
+    }
+    return alive;
+}
+
+void SnapshotStore::RegisterClone(const LinkedClone& clone)
+{
+    // Allowed while the VM runs: only the metadata changes.
+    std::erase_if(clones_, [&](const LinkedClone& known) { return _wcsicmp(known.id.c_str(), clone.id.c_str()) == 0; });
+    clones_.push_back(clone);
+    Save();
+}
+
+void SnapshotStore::UnregisterClone(const std::wstring& id)
+{
+    const auto before = clones_.size();
+    std::erase_if(clones_, [&](const LinkedClone& known) { return _wcsicmp(known.id.c_str(), id.c_str()) == 0; });
+    if (clones_.size() != before) Save();
+}
+
 void SnapshotStore::Restore(std::uint32_t id)
 {
     RequireStopped();
@@ -369,6 +420,17 @@ void SnapshotStore::Remove(std::uint32_t id)
     if (found == snapshots_.end()) throw std::invalid_argument("Instantané inconnu.");
     const auto layer = found->layer;
     const bool isBase = _wcsicmp(layer.c_str(), baseName_.c_str()) == 0;
+    // A linked clone reads this layer, or a layer built on it: deleting the
+    // snapshot would change or remove it.
+    for (const auto& clone : LinkedClones()) {
+        auto current = clone.layer;
+        for (int depth = 0; !current.empty() && depth < 4096; ++depth, current = OwnParent(current)) {
+            if (_wcsicmp(current.c_str(), layer.c_str()) == 0) {
+                throw std::runtime_error("Le clone lié « " + ToUtf8(clone.name) +
+                                         " » repose sur cet instantané : supprime d'abord ce clone.");
+            }
+        }
+    }
     const auto children = ChildrenOf(layer);
     const auto rename = [&](const std::wstring& from, const std::wstring& to) {
         for (auto& snapshot : snapshots_) {
@@ -383,7 +445,7 @@ void SnapshotStore::Remove(std::uint32_t id)
         // has, so its view does not change while its blocks are copied down.
         const auto child = children.front();
         auto source = LayerFile::Open(PathOf(child), false);
-        if (isBase) {
+        if (!LayerFile::IsLayer(PathOf(layer))) { // Raw base image: blocks written in place.
             const HANDLE base = CreateFileW(PathOf(layer).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
                                             FILE_ATTRIBUTE_NORMAL, nullptr);
             if (base == INVALID_HANDLE_VALUE) {

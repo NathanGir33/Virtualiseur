@@ -162,8 +162,10 @@ Vm::Vm(const VmConfig& config, SerialOutput serialOutput)
             const auto current = virtualiseur::whp::SnapshotStore::CurrentDisk(config_.disk);
             disk_.emplace(virtualiseur::whp::VirtualDisk::Open(current));
             if (disk_->LayerCount() != 0) {
-                VMM_INFO("Disque : couche active %s, %zu couche(s) au-dessus de %s.", PathUtf8(current.filename()).c_str(),
-                         disk_->LayerCount(), PathUtf8(config_.disk.filename()).c_str());
+                // Chain length counts the layers down to the raw image (a linked
+                // clone's chain continues into its source's folder).
+                VMM_INFO("Disque en couches : couche active %s, %zu couche(s) au-dessus de l'image brute.",
+                         PathUtf8(current.filename()).c_str(), disk_->LayerCount());
             }
         } else {
             if (config_.diskSizeMiB == 0) throw std::runtime_error("Le disque n'existe pas et aucune taille n'est indiquée.");

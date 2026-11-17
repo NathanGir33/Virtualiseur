@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <array>
@@ -68,6 +69,8 @@ struct VmConfig {
     bool audio = true;
     bool microphone = false; // The guest may record the Windows microphone.
     std::array<ShareConfig, kMaxShares> shares; // Empty path: unused slot.
+    std::wstring uuid;     // Unique id (given to clones; empty for older machines).
+    fs::path cloneOf;      // Linked clone: the source machine's disk image (its snapshot store).
     bool graphicalInstaller = false;
     bool guestTools = true;
     fs::path preseed;
@@ -121,6 +124,9 @@ OsBadge Badge(const VmConfig& config);
 std::vector<HostAdapterInfo> HostNetworkAdapters();
 bool NpcapAvailable();
 std::wstring RandomMac();
+// Fresh unique id (lowercase UUID) and a MAC address no machine of `vms` uses.
+std::wstring NewUuid();
+std::wstring UniqueMac(const std::vector<VmEntry>& vms);
 bool ValidMac(const std::wstring& mac);
 std::wstring FormatForwards(const std::vector<PortForward>& forwards); // "tcp:2222:22;udp:5353:53"
 std::vector<PortForward> ParseForwards(const std::wstring& text);
@@ -135,6 +141,20 @@ std::uint64_t FreeSpace(const fs::path& path);
 
 // Sends one control command to a running VM; nullopt if it does not answer.
 std::optional<std::string> SendCommand(const std::wstring& vmName, const char* command);
+
+// Clone of a machine, from its current state (snapshot 0) or a snapshot.
+// Full: the state is flattened into a new sparse disk.img (no history).
+// Linked: disk.layer over a frozen layer of the source (a snapshot is taken
+// first from the current state, frozen through the VM if it runs), recorded
+// in the source's snapshot store. New name, MAC address and id.
+struct CloneRequest {
+    std::wstring name;
+    bool linked = false;
+    std::uint32_t snapshot = 0;
+};
+bool CloneVm(const VmEntry& source, bool sourceStopped, const CloneRequest& request, const fs::path& library,
+             const std::vector<VmEntry>& vms, const std::function<bool(std::uint64_t, std::uint64_t)>& progress,
+             std::wstring& message);
 // Starts the VM process; on failure returns false with a message.
 bool LaunchVm(VmEntry& vm, std::wstring& message);
 

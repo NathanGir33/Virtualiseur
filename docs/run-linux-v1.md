@@ -106,6 +106,8 @@ Un dossier ajouté pendant que la machine tourne n'apparaît qu'au démarrage su
 
 Bouton **Instantanés** du gestionnaire : *Prendre* fige le disque, même machine allumée (avec qemu-guest-agent, ses systèmes de fichiers sont gelés une seconde pour un disque propre ; sans lui, l'instantané est marqué « sans gel », cohérent comme après une coupure de courant). Machine éteinte seulement : *Restaurer* le ramène à un instantané (les modifications faites depuis sont perdues), *Supprimer* retire un instantané sans changer l'état actuel ni les autres. Seul le disque est sauvegardé, pas la mémoire : restaurer revient à redémarrer la machine dans cet état. Les couches (`disk-<n>.layer`) et `disk.snapshots.ini` sont à côté de `disk.img` ; ne les déplace pas séparément. En ligne de commande : `VirtualiseurVM.exe --disk disk.img --snapshot list|take <nom>|restore <n>|delete <n>`.
 
+**Cloner** (même fenêtre, sur l'état actuel ou un instantané) : un *clone complet* est une copie indépendante du disque (seuls les blocs utilisés sont écrits, sans l'historique) ; un *clone lié* est créé tout de suite et ne stocke que ses propres modifications, mais il lit le disque de la source : tant qu'il existe, on ne peut supprimer ni la source ni l'instantané dont il part, ni renommer l'une ou l'autre. Depuis l'état actuel, un clone lié commence par un instantané « Clone <nom> » de la source (gelé si elle tourne). Source et clones liés peuvent tourner en même temps. Chaque clone reçoit une nouvelle adresse MAC et un nouvel identifiant. Le gestionnaire accepte `--library <dossier>` pour ouvrir une autre bibliothèque.
+
 ## 7. Diagnostic
 
 Chaque VM écrit dans son dossier :

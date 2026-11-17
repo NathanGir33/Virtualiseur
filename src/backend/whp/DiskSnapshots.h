@@ -62,6 +62,21 @@ public:
     };
     LiveTake BeginLive(const std::wstring& name, const std::wstring& description, const std::wstring& state);
     void AbortLive(const LiveTake& take);
+
+    // Linked clones: VMs whose disk is a layer over one of this store's
+    // frozen layers. That layer and its ancestors must never change: deleting
+    // a snapshot on that path, or the VM itself, is refused while they exist.
+    struct LinkedClone {
+        std::wstring id;    // Clone VM's unique id.
+        std::wstring name;
+        std::wstring disk;  // Clone's disk layer, relative to this folder.
+        std::wstring layer; // This store's frozen layer it is built on.
+    };
+    // Only the clones whose disk still exists: a clone folder deleted by hand
+    // never keeps blocking the source.
+    std::vector<LinkedClone> LinkedClones() const;
+    void RegisterClone(const LinkedClone& clone);
+    void UnregisterClone(const std::wstring& id);
     void Restore(std::uint32_t id);
     void Remove(std::uint32_t id);
 
@@ -70,6 +85,8 @@ private:
     std::filesystem::path MetadataPath() const;
     std::wstring NewLayerName();
     // Snapshot whose layer is the nearest ancestor of `layer` (0: none).
+    // Parent of `layer` if it is in this folder, else empty.
+    std::wstring OwnParent(const std::wstring& layer) const;
     std::uint32_t SnapshotAbove(const std::wstring& layer) const;
     // Layers in use: the current one, the snapshots' and all their ancestors.
     std::vector<std::wstring> LiveLayers() const;
@@ -87,6 +104,7 @@ private:
     std::uint32_t next_ = 1;
     std::uint32_t nextLayer_ = 1;
     std::vector<Snapshot> snapshots_;
+    std::vector<LinkedClone> clones_;
 };
 
 } // namespace virtualiseur::whp

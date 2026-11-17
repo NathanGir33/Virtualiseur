@@ -23,7 +23,7 @@ Hyperviseur de type 2 pour Windows 11, dans l'esprit de VirtualBox, construit su
 - **ACPI** : arrêt propre via le bouton d'alimentation, extinction S5, redémarrage, timer PM et routage PCI (`_PRT`).
 - **Gestionnaire de VM** dans l'esprit de VirtualBox : barre d'outils, liste des machines avec leur état, panneau de détails par section, fenêtre de configuration par catégories (Général, Système, Affichage, Stockage, Audio, Réseau, Installation) avec curseurs pour la RAM, les vCPU et le disque, et zones vert/orange/rouge selon les ressources de l'hôte. Création guidée depuis une ISO (système détecté d'après son nom), agrandissement du disque, pause/reprise, arrêt ACPI, redémarrage, extinction forcée, journal, suppression d'une VM avec son disque.
 - **Installation automatique** : un fichier preseed Debian est injecté dans l'initrd (`--preseed`).
-- **Instantanés de disque** : fenêtre *Instantanés* du gestionnaire (prendre, restaurer, supprimer, en arbre) ; prise possible machine allumée, systèmes de fichiers gelés par qemu-guest-agent (sinon « cohérent après plantage ») ; format en couches de 64 Kio sans droits administrateur, le `disk.img` existant devient la base. Pas d'instantané de la mémoire (l'état 3D virgl ne se sauvegarde pas).
+- **Instantanés de disque** : fenêtre *Instantanés* du gestionnaire (prendre, restaurer, supprimer, en arbre) ; prise possible machine allumée, systèmes de fichiers gelés par qemu-guest-agent (sinon « cohérent après plantage ») ; **clones** complets (disque aplati, sparse) ou liés (couche sur un instantané de la source, protégée tant que le clone existe) ; format en couches de 64 Kio sans droits administrateur, le `disk.img` existant devient la base. Pas d'instantané de la mémoire (l'état 3D virgl ne se sauvegarde pas).
 - **Dossiers partagés** (virtio-9p, 3 au plus), montés tout seuls sur `/media/<nom>` par qemu-guest-agent ; **micro** de l'hôte (désactivé par défaut) ; **heure** de l'invité tenue sur celle de l'hôte ; **ISO et câble réseau** changeables à chaud.
 
 Mesures sur un i5-11300H, VM de 2 vCPU et 2 Gio :
@@ -94,7 +94,6 @@ libslirp (BSD-3-Clause) et ses dépendances (glib : LGPL-2.1+) sont restaurées 
 1. Valider le NAT libslirp sur plusieurs versions de Windows (téléchargements apt, mises à jour).
 2. EDID virtio-gpu (liste de résolutions et nom d'écran dans l'invité).
 3. Firmware UEFI (OVMF) pour les ISO non Linux et les invités Windows.
-4. Clones de machines (complet ou lié).
-5. Signature et installateur pour une distribution grand public.
+4. Signature et installateur pour une distribution grand public.
 
 Pistes pour la 3D : afficher directement la texture de l'invité, sans relecture (partage WGL/Direct3D) ; Vulkan avec Venus. WHP ne permet pas de donner le GPU à la VM (GPU-P et DDA sont réservés à Hyper-V).
