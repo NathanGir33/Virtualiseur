@@ -24,7 +24,12 @@ HostCapabilities QueryHostCapabilities() noexcept;
 // devices, guest boot state, exit handling, and the UI are separate work.
 class Partition final {
 public:
-    explicit Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic = false);
+    // `hypervEnlightenments` exposes the Hyper-V synthetic interface that
+    // WHP implements itself (CPUID 0x40000000 leaves, reference TSC page,
+    // frequency MSRs, synthetic timers): guests then read the time and the
+    // TSC frequency without calibration and without VM exits.
+    explicit Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic = false,
+                       bool hypervEnlightenments = false);
     ~Partition();
 
     Partition(const Partition&) = delete;
@@ -33,6 +38,8 @@ public:
     Partition& operator=(Partition&&) = delete;
 
     std::uint32_t VirtualProcessorCount() const noexcept;
+    // Synthetic features actually enabled (0 without enlightenments).
+    WHV_SYNTHETIC_PROCESSOR_FEATURES SyntheticFeatures() const noexcept { return syntheticFeatures_; }
     void* AllocateAndMapGuestMemory(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes,
                                     bool trackDirtyPages = false);
     // Fills one bit per 4 KiB page written since the previous query (and
@@ -74,7 +81,10 @@ private:
 
     void Close() noexcept;
 
+    void EnableEnlightenments();
+
     WHV_PARTITION_HANDLE handle_ = nullptr;
+    WHV_SYNTHETIC_PROCESSOR_FEATURES syntheticFeatures_{};
     std::vector<std::uint32_t> createdProcessors_;
     std::vector<MemoryMapping> memoryMappings_;
 };

@@ -56,6 +56,7 @@ void PrintUsage()
         "  --nat-forward tcp|udp:<hôte>:<invité>  Redirection de port 127.0.0.1 -> invité (répétable)\n"
         "  --fullscreen              Ouvre la fenêtre en plein écran (Ctrl droit + F pour en sortir)\n"
         "  --audio on|off            Carte son virtio-sound vers la sortie audio de Windows (défaut on)\n"
+        "  --hyperv on|off           Enlightenments Hyper-V : horloge TSC de référence, timers synthétiques (défaut on)\n"
         "  --preseed <fichier>       Installation Debian automatique (fichier preseed)\n"
         "  --guest-tools on|off      Installer Debian : ajoute spice-vdagent (presse-papiers, fichiers)\n"
         "                            quand un bureau est installé (défaut on)\n"
@@ -201,6 +202,11 @@ Options ParseOptions(const std::vector<std::string>& args)
             if (value == "on") options.vm.audio = true;
             else if (value == "off") options.vm.audio = false;
             else throw std::invalid_argument("--audio attend on ou off.");
+        } else if (option == "--hyperv") {
+            const auto& value = next();
+            if (value == "on") options.vm.hyperv = true;
+            else if (value == "off") options.vm.hyperv = false;
+            else throw std::invalid_argument("--hyperv attend on ou off.");
         } else if (option == "--preseed") options.vm.preseed = Utf8Path(next());
         else if (option == "--rtc") options.vm.rtcLocalTime = next() == "local";
         else if (option == "--serial-log") options.serialLog = Utf8Path(next());

@@ -101,7 +101,18 @@ Vm::Vm(const VmConfig& config, SerialOutput serialOutput)
                                  "« Plateforme de l'hyperviseur Windows » puis redémarre Windows.");
     }
 
-    partition_ = std::make_unique<virtualiseur::whp::Partition>(config_.cpus, true);
+    partition_ = std::make_unique<virtualiseur::whp::Partition>(config_.cpus, true, config_.hyperv);
+    if (config_.hyperv) {
+        const auto features = partition_->SyntheticFeatures();
+        if (features.AsUINT64 == 0) {
+            VMM_WARN("Enlightenments Hyper-V indisponibles sur cet hôte : l'invité étalonnera ses horloges.");
+        } else {
+            VMM_INFO("Enlightenments Hyper-V : page TSC %s, fréquences %s, timers synthétiques %s.",
+                     features.AccessPartitionReferenceTsc ? "oui" : "non",
+                     features.AccessFrequencyRegs ? "oui" : "non",
+                     features.DirectSyntheticTimers && features.AccessSyntheticTimerRegs ? "directs" : "non");
+        }
+    }
 
     std::uint64_t framebufferBytes = 0;
     if (config_.display == DisplayMode::Graphics) {
@@ -387,7 +398,12 @@ void Vm::LoadBootImage()
         AppendArgument(commandLine, "console=ttyS0,115200n8");
         if (config_.display != DisplayMode::None) AppendArgument(commandLine, "console=tty0");
     }
-    if (!HasArgument(commandLine, "tsc")) AppendArgument(commandLine, "tsc=reliable");
+    // With the Hyper-V reference TSC page the guest has a stable clock
+    // source; otherwise trust the (invariant) TSC rather than let the
+    // watchdog demote it to the slow ACPI PM timer.
+    if (!partition_->SyntheticFeatures().AccessPartitionReferenceTsc && !HasArgument(commandLine, "tsc")) {
+        AppendArgument(commandLine, "tsc=reliable");
+    }
     if (fromIso && config_.display == DisplayMode::None && !HasArgument(commandLine, "DEBIAN_FRONTEND")) {
         AppendArgument(commandLine, "DEBIAN_FRONTEND=text");
     }

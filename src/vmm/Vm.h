@@ -82,6 +82,7 @@ struct VmConfig {
     std::filesystem::path preseed; // Debian preseed file injected as /preseed.cfg (ISO boot).
     bool rtcLocalTime = false;     // Hardware clock in local time (Windows) instead of UTC.
     bool audio = true;             // virtio-sound card played on the default Windows output.
+    bool hyperv = true;            // Hyper-V enlightenments (reference TSC page, synthetic timers).
 };
 
 // What the display window should render.

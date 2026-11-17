@@ -54,7 +54,7 @@ HostCapabilities QueryHostCapabilities() noexcept
     return result;
 }
 
-Partition::Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic)
+Partition::Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic, bool hypervEnlightenments)
 {
     if (virtualProcessorCount == 0) {
         throw std::invalid_argument("A WHP partition must have at least one vCPU.");
@@ -102,6 +102,7 @@ Partition::Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic)
                         sizeof(interruptClock.InterruptClockFrequency)));
             }
         }
+        if (hypervEnlightenments) EnableEnlightenments();
         CheckHRESULT("WHvSetupPartition", WHvSetupPartition(handle_));
 
         createdProcessors_.reserve(virtualProcessorCount);
@@ -120,6 +121,50 @@ Partition::Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic)
 Partition::~Partition()
 {
     Close();
+}
+
+void Partition::EnableEnlightenments()
+{
+    WHV_CAPABILITY capability{};
+    UINT32 written = 0;
+    if (FAILED(WHvGetCapability(WHvCapabilityCodeSyntheticProcessorFeaturesBanks, &capability,
+                                sizeof(capability), &written)) ||
+        written < sizeof(WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS) ||
+        capability.SyntheticProcessorFeaturesBanks.BanksCount < 1) {
+        return; // Host too old: the guest keeps calibrating its own clocks.
+    }
+
+    WHV_SYNTHETIC_PROCESSOR_FEATURES wanted{};
+    // Linux only recognises Hyper-V with the hypercall and VP index MSRs.
+    wanted.HypervisorPresent = 1;
+    wanted.Hv1 = 1;
+    wanted.AccessHypercallRegs = 1;
+    wanted.AccessVpIndex = 1;
+    // VP assist page (Linux writes its MSR on every CPU) and the synthetic
+    // APIC MSRs (EOI, ICR, TPR without APIC page emulation).
+    wanted.AccessIntrCtrlRegs = 1;
+    // Clock: reference counter and TSC page (clocksource without exits),
+    // TSC and APIC timer frequencies (no PIT calibration at boot).
+    wanted.AccessPartitionReferenceCounter = 1;
+    wanted.AccessPartitionReferenceTsc = 1;
+    wanted.AccessFrequencyRegs = 1;
+    wanted.AccessVpRunTimeReg = 1;
+    // Synthetic timers in direct mode: per-vCPU timers that fire an APIC
+    // vector, without the SynIC message machinery (no VMBus here).
+    wanted.AccessSynicRegs = 1;
+    wanted.AccessSyntheticTimerRegs = 1;
+    wanted.DirectSyntheticTimers = 1;
+
+    WHV_SYNTHETIC_PROCESSOR_FEATURES_BANKS banks{};
+    banks.BanksCount = 1;
+    banks.AsUINT64[0] = wanted.AsUINT64 & capability.SyntheticProcessorFeaturesBanks.AsUINT64[0];
+    WHV_SYNTHETIC_PROCESSOR_FEATURES granted{};
+    granted.AsUINT64 = banks.AsUINT64[0];
+    if (!granted.HypervisorPresent || !granted.Hv1 || !granted.AccessHypercallRegs || !granted.AccessVpIndex) return;
+    if (SUCCEEDED(WHvSetPartitionProperty(handle_, WHvPartitionPropertyCodeSyntheticProcessorFeaturesBanks,
+                                          &banks, sizeof(banks)))) {
+        syntheticFeatures_ = granted;
+    }
 }
 
 std::uint32_t Partition::VirtualProcessorCount() const noexcept
