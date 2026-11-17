@@ -151,6 +151,7 @@ void VirtioGpu::RequestDisplaySize(std::uint32_t width, std::uint32_t height)
     if (width == displayWidth_ && height == displayHeight_) return;
     displayWidth_ = width;
     displayHeight_ = height;
+    VMM_INFO("virtio-gpu: taille %ux%u demandée à l'invité.", width, height);
     if (!DriverReady()) return;
     eventsRead_ |= kEventDisplay;
     SignalConfigChange();

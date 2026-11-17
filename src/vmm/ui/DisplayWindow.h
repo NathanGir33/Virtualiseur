@@ -76,6 +76,8 @@ private:
     void RequestGuestResize();
     // Debounced guest resolution change after the window size changed.
     void ScheduleGuestResize(UINT delayMs);
+    // WM_SIZING: keeps the client width a multiple of 8 (guest mode grid).
+    void SnapSizingWidth(WPARAM edge, RECT& rect);
     // Full screen on the window's monitor; a slim bar at the top edge gives
     // the menu and the way out (also Right Ctrl + F).
     void ToggleFullscreen();

@@ -25,10 +25,10 @@ enum MenuId : UINT {
     kMenuAcpiShutdown,
     kMenuReset,
     kMenuPowerOff,
-    kMenuActualSize = 201,
-    kMenuFitGuest,
-    kMenuFullscreen,
-    kMenuAutoResize,
+    kMenuFullscreen = 201,
+    kMenuAutoResize,      // Radio: the guest resolution follows the window...
+    kMenuFixedResolution, // ...or stays put and the image is scaled.
+    kMenuActualSize,
     kMenuHelp = 301,
     kMenuMute = 401,
     kMenuCaptureKeyboard,
@@ -115,9 +115,10 @@ DisplayWindow::DisplayWindow(std::wstring vmName, VmSlot& slot, std::uint32_t wi
     HMENU view = CreatePopupMenu();
     AppendMenuW(view, MF_STRING, kMenuFullscreen, L"&Plein écran\tCtrl droit+F");
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(view, MF_STRING, kMenuAutoResize, L"&Redimensionner l'invité avec la fenêtre");
-    AppendMenuW(view, MF_STRING, kMenuFitGuest, L"&Adapter la résolution invitée à la fenêtre");
-    AppendMenuW(view, MF_STRING, kMenuActualSize, L"&Taille de l'écran invité");
+    AppendMenuW(view, MF_STRING, kMenuAutoResize, L"&Résolution de l'invité adaptée à la fenêtre");
+    AppendMenuW(view, MF_STRING, kMenuFixedResolution, L"Résolution fi&xe, image mise à l'échelle");
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(view, MF_STRING, kMenuActualSize, L"Fenêtre à la &taille de l'écran invité");
     AppendMenuW(menu_, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&Affichage");
     HMENU devices = CreatePopupMenu();
     AppendMenuW(devices, MF_STRING, kMenuMute, L"&Couper le son");
@@ -492,7 +493,9 @@ void DisplayWindow::RequestGuestResize()
     const auto height = client.bottom - client.top;
     if (width <= 0 || height <= 0) return;
     lastClientSize_ = {width, height};
-    vm->RequestDisplaySize(static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height));
+    // Ask for what the guest will set (its modes have a width multiple of 8),
+    // so the request and the guest's answer always agree.
+    vm->RequestDisplaySize(static_cast<std::uint32_t>(width) & ~7u, static_cast<std::uint32_t>(height));
 }
 
 bool DisplayWindow::EnsureD2D()
@@ -789,6 +792,9 @@ LRESULT DisplayWindow::Handle(UINT message, WPARAM wParam, LPARAM lParam)
         // pauses; otherwise (maximize, snap, full screen) right away.
         if (wParam != SIZE_MINIMIZED) ScheduleGuestResize(inSizeMove_ ? 250 : 60);
         return 0;
+    case WM_SIZING:
+        if (autoResize_ && gpuMode_ && !fullscreen_) SnapSizingWidth(wParam, *reinterpret_cast<RECT*>(lParam));
+        return TRUE;
     case WM_ENTERSIZEMOVE:
         inSizeMove_ = true;
         return DefWindowProcW(window_, message, wParam, lParam);
@@ -1175,7 +1181,10 @@ void DisplayWindow::UpdateTitle()
     EnableMenuItem(menu_, kMenuMute, MF_BYCOMMAND | (vm && vm->HasAudio() ? MF_ENABLED : MF_GRAYED));
     CheckMenuItem(menu_, kMenuMute, MF_BYCOMMAND | (audioMuted_ ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(menu_, kMenuFullscreen, MF_BYCOMMAND | (fullscreen_ ? MF_CHECKED : MF_UNCHECKED));
-    CheckMenuItem(menu_, kMenuAutoResize, MF_BYCOMMAND | (autoResize_ ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuRadioItem(menu_, kMenuAutoResize, kMenuFixedResolution,
+                       autoResize_ ? kMenuAutoResize : kMenuFixedResolution, MF_BYCOMMAND);
+    // 1:1 window only makes sense when the guest keeps its resolution.
+    EnableMenuItem(menu_, kMenuActualSize, MF_BYCOMMAND | (autoResize_ ? MF_GRAYED : MF_ENABLED));
     EnableMenuItem(menu_, kMenuCaptureKeyboard, MF_BYCOMMAND | (keyboardHook_ != nullptr ? MF_ENABLED : MF_GRAYED));
     CheckMenuItem(menu_, kMenuCaptureKeyboard,
                   MF_BYCOMMAND | (captureKeyboard_ && keyboardHook_ != nullptr ? MF_CHECKED : MF_UNCHECKED));
@@ -1227,6 +1236,25 @@ bool DisplayWindow::OnHookKey(const KBDLLHOOKSTRUCT& key)
                                             (released ? 0xC0000000u : 0u) | 1u);
     OnKey(vk, lParam, released);
     return true;
+}
+
+void DisplayWindow::SnapSizingWidth(WPARAM edge, RECT& rect)
+{
+    // The guest kernel builds the requested mode with drm_cvt_mode, which
+    // rounds the width down to a multiple of 8: a 1389-pixel window got a
+    // 1384-pixel desktop, centred between two thin black bars. Keeping the
+    // client width on that grid while dragging gives the guest exactly the
+    // window size, shown 1:1.
+    RECT frame{};
+    const UINT dpi = GetDpiForWindow(window_);
+    AdjustWindowRectExForDpi(&frame, static_cast<DWORD>(GetWindowLongPtrW(window_, GWL_STYLE)), TRUE,
+                             static_cast<DWORD>(GetWindowLongPtrW(window_, GWL_EXSTYLE)), dpi != 0 ? dpi : 96);
+    const LONG frameWidth = frame.right - frame.left;
+    const LONG client = rect.right - rect.left - frameWidth;
+    if (client <= 8) return;
+    const LONG width = (client + 4) / 8 * 8 + frameWidth; // Nearest multiple of 8.
+    if (edge == WMSZ_LEFT || edge == WMSZ_TOPLEFT || edge == WMSZ_BOTTOMLEFT) rect.left = rect.right - width;
+    else rect.right = rect.left + width;
 }
 
 void DisplayWindow::ScheduleGuestResize(UINT delayMs)
@@ -1612,15 +1640,20 @@ void DisplayWindow::OnCommand(UINT id)
     case kMenuActualSize:
         ResizeToGuest();
         break;
-    case kMenuFitGuest:
-        RequestGuestResize();
-        break;
     case kMenuFullscreen:
         ToggleFullscreen();
         break;
     case kMenuAutoResize:
-        autoResize_ = !autoResize_;
-        if (autoResize_) ScheduleGuestResize(30);
+        if (!autoResize_) {
+            autoResize_ = true;
+            ScheduleGuestResize(30); // Catch up with the current window size.
+        }
+        UpdateTitle();
+        break;
+    case kMenuFixedResolution:
+        autoResize_ = false;
+        KillTimer(window_, kResizeTimer);
+        UpdateTitle();
         break;
     case kMenuMute:
         audioMuted_ = !audioMuted_;
