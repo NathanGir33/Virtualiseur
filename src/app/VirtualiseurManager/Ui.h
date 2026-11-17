@@ -1,29 +1,59 @@
 #pragma once
 
-// Look and feel of the manager: Windows 11 style light theme, DPI-aware
-// fonts, anti-aliased shapes (GDI+) and flat owner-drawn toolbar buttons.
+// Look and feel of the manager: Windows 11 style light or dark theme (or the
+// Windows setting), DPI-aware fonts, anti-aliased shapes (GDI+) and flat
+// owner-drawn toolbar buttons.
 
 #include <Windows.h>
+#include <commctrl.h>
 
 #include <string>
 
 namespace ui {
 
+// The current palette: SetTheme rewrites it (light values below by default).
+// Colors are read at paint time, so a theme change only needs a repaint.
 namespace color {
-inline constexpr COLORREF kWindow = RGB(243, 243, 243);
-inline constexpr COLORREF kPanel = RGB(255, 255, 255);
-inline constexpr COLORREF kBorder = RGB(224, 224, 224);
-inline constexpr COLORREF kText = RGB(26, 26, 26);
-inline constexpr COLORREF kSecondary = RGB(96, 96, 96);
-inline constexpr COLORREF kAccent = RGB(0, 103, 192);
-inline constexpr COLORREF kAccentSoft = RGB(230, 241, 251);
-inline constexpr COLORREF kHover = RGB(235, 235, 235);
-inline constexpr COLORREF kPressed = RGB(222, 222, 222);
-inline constexpr COLORREF kGreen = RGB(16, 124, 16);
-inline constexpr COLORREF kOrange = RGB(202, 120, 0);
-inline constexpr COLORREF kRed = RGB(196, 43, 28);
-inline constexpr COLORREF kDisabled = RGB(165, 165, 165);
+inline COLORREF kWindow = RGB(243, 243, 243);
+inline COLORREF kPanel = RGB(255, 255, 255);
+inline COLORREF kBorder = RGB(224, 224, 224);
+inline COLORREF kText = RGB(26, 26, 26);
+inline COLORREF kSecondary = RGB(96, 96, 96);
+inline COLORREF kAccent = RGB(0, 103, 192);
+inline COLORREF kAccentSoft = RGB(230, 241, 251);
+inline COLORREF kHover = RGB(235, 235, 235);
+inline COLORREF kPressed = RGB(222, 222, 222);
+inline COLORREF kGreen = RGB(16, 124, 16);
+inline COLORREF kOrange = RGB(202, 120, 0);
+inline COLORREF kRed = RGB(196, 43, 28);
+inline COLORREF kDisabled = RGB(165, 165, 165);
+// One color per kind of setting (cards, icons): same meaning everywhere.
+inline COLORREF kPurple = RGB(136, 23, 152);   // Display.
+inline COLORREF kTeal = RGB(0, 120, 120);      // Storage.
+inline COLORREF kPink = RGB(191, 0, 119);      // Audio.
+inline COLORREF kAmber = RGB(157, 93, 0);      // Shared folders.
+inline COLORREF kIndigo = RGB(79, 70, 229);    // Snapshots.
+inline COLORREF kSlate = RGB(90, 98, 112);     // General, installation.
 } // namespace color
+
+enum class Theme { System, Light, Dark };
+// Fills the palette and the Windows dark-mode hints (menus). System follows
+// the Windows "app mode" setting.
+void SetTheme(Theme theme);
+Theme CurrentTheme();
+bool IsDark();
+// Title bar (DWM) and the window's own scroll bars follow the theme.
+void ThemeWindow(HWND window);
+// Native controls (edits, lists, combo boxes, buttons) follow the theme.
+void ThemeControl(HWND control);
+// `b` over `a` at `percent` % (tints, light versions of a color).
+COLORREF Mix(COLORREF a, COLORREF b, int percent);
+// Windows 11 style check box (NM_CUSTOMDRAW of a BS_AUTOCHECKBOX button);
+// returns the custom-draw result.
+LRESULT DrawCheckBox(const NMCUSTOMDRAW& draw, COLORREF background);
+// Main menu bar in the dark theme (undocumented WM_UAHDRAWMENU* messages, as
+// Windows itself has no dark menu bar): true when the message was handled.
+bool HandleMenuBar(HWND window, UINT message, WPARAM wParam, LPARAM lParam, LRESULT& result);
 
 // Segoe Fluent Icons (Windows 11) / Segoe MDL2 Assets (Windows 10) glyphs.
 namespace glyph {
@@ -45,6 +75,8 @@ inline constexpr wchar_t kAudio = 0xE767;
 inline constexpr wchar_t kNetwork = 0xE968;
 inline constexpr wchar_t kInstall = 0xE896;
 inline constexpr wchar_t kWarning = 0xE7BA;
+inline constexpr wchar_t kCheck = 0xE73E;
+inline constexpr wchar_t kComputer = 0xE977;
 } // namespace glyph
 
 struct Fonts {
@@ -78,6 +110,7 @@ int TextWidth(HDC dc, const std::wstring& text, HFONT font);
 // Flat toolbar button (BS_OWNERDRAW): glyph above a label, hover feedback.
 void MakeFlatButton(HWND button, wchar_t glyph, const std::wstring& label, COLORREF glyphColor = CLR_INVALID);
 void SetFlatButton(HWND button, wchar_t glyph, const std::wstring& label, COLORREF glyphColor = CLR_INVALID);
+void SetFlatButtonColor(HWND button, COLORREF glyphColor); // After a theme change.
 // WM_DRAWITEM handler for flat buttons; returns false for other controls.
 bool DrawFlatButton(const DRAWITEMSTRUCT& item, COLORREF background);
 

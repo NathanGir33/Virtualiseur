@@ -404,40 +404,6 @@ std::wstring DetectOsFromIso(const fs::path& iso)
     return {};
 }
 
-OsBadge Badge(const VmConfig& config)
-{
-    struct Family {
-        const wchar_t* key;
-        const wchar_t* initials;
-        COLORREF color;
-    };
-    static constexpr Family kFamilies[] = {
-        {L"debian", L"De", RGB(215, 10, 83)},     {L"kubuntu", L"Ku", RGB(0, 121, 193)},
-        {L"xubuntu", L"Xu", RGB(43, 120, 194)},    {L"ubuntu", L"Ub", RGB(233, 84, 32)},
-        {L"mint", L"Mi", RGB(105, 165, 60)},       {L"fedora", L"Fe", RGB(41, 65, 114)},
-        {L"arch", L"Ar", RGB(23, 147, 209)},       {L"opensuse", L"Su", RGB(115, 186, 37)},
-        {L"kali", L"Ka", RGB(40, 120, 200)},       {L"alpine", L"Al", RGB(13, 89, 127)},
-        {L"rocky", L"Ro", RGB(16, 185, 129)},      {L"alma", L"Al", RGB(8, 92, 168)},
-        {L"centos", L"Ce", RGB(147, 46, 147)},     {L"manjaro", L"Ma", RGB(53, 191, 92)},
-        {L"pop", L"Po", RGB(72, 185, 199)},        {L"elementary", L"El", RGB(100, 186, 255)},
-    };
-    const auto text = Lower(config.os.empty() ? config.name : config.os);
-    for (const auto& family : kFamilies) {
-        if (text.find(family.key) != std::wstring::npos) {
-            return {config.os.empty() ? std::wstring(L"Linux") : config.os, family.initials, family.color};
-        }
-    }
-    std::wstring initials;
-    for (const wchar_t ch : config.name) {
-        if (std::iswalnum(ch)) {
-            initials.push_back(static_cast<wchar_t>(std::towupper(ch)));
-            break;
-        }
-    }
-    if (initials.empty()) initials = L"VM";
-    return {L"Linux", initials, RGB(90, 98, 112)};
-}
-
 bool CreateSparseDisk(const fs::path& path, std::uint64_t bytes)
 {
     std::error_code error;

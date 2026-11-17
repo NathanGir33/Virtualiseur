@@ -97,12 +97,6 @@ struct HostInfo {
     unsigned memoryMiB = 4096;
 };
 
-struct OsBadge {
-    std::wstring family;   // "Debian", "Ubuntu"... or "Linux".
-    std::wstring initials; // Two letters shown in the badge.
-    COLORREF color;
-};
-
 constexpr const wchar_t* kResolutions[] = {L"1024x768", L"1280x720", L"1280x800", L"1366x768", L"1440x900",
                                            L"1600x900", L"1680x1050", L"1920x1080", L"1920x1200", L"2560x1440"};
 
@@ -118,7 +112,6 @@ void RefreshDiskInfo(VmEntry& entry);
 
 // "Debian 13" from "debian-13.7.0-amd64-netinst.iso"; empty if unknown.
 std::wstring DetectOsFromIso(const fs::path& iso);
-OsBadge Badge(const VmConfig& config);
 
 // Network helpers.
 std::vector<HostAdapterInfo> HostNetworkAdapters();

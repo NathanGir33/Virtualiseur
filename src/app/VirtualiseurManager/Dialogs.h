@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Ui.h"
 #include "VmLibrary.h"
 
 #include <vector>
@@ -21,6 +22,23 @@ enum SettingsPage : int {
 
 // VirtualBox-style settings window. Returns true when the user pressed OK;
 // `config` then holds the validated settings (disk path never empty).
+// One color per kind of setting, the same in the settings list and the
+// machine's cards (pages past kPageCount: the snapshots card).
+inline COLORREF PageColor(int page)
+{
+    switch (page) {
+    case kPageGeneral: return ui::color::kSlate;
+    case kPageSystem: return ui::color::kAccent;
+    case kPageDisplay: return ui::color::kPurple;
+    case kPageStorage: return ui::color::kTeal;
+    case kPageAudio: return ui::color::kPink;
+    case kPageNetwork: return ui::color::kGreen;
+    case kPageShares: return ui::color::kAmber;
+    case kPageInstall: return ui::color::kSlate;
+    default: return ui::color::kIndigo;
+    }
+}
+
 bool ShowSettingsDialog(HWND owner, const VmEntry& vm, const std::vector<VmEntry>& library, VmConfig& config,
                         int startPage = kPageGeneral);
 

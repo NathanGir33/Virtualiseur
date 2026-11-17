@@ -52,7 +52,12 @@ enum CommandId : int {
     IdRefresh,
     IdExit,
     IdAbout,
+    IdThemeSystem,
+    IdThemeLight,
+    IdThemeDark,
 };
+
+COLORREF ToolbarColor(int id, bool paused = false);
 
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr int kToolbarHeight = 74;
@@ -108,9 +113,27 @@ COLORREF StateColor(RunState state)
     }
 }
 
+// Machine icon tinted by its state: green running, orange paused, accent
+// starting, grey stopped. (The guest system is written next to it.)
+void DrawStateTile(HDC dc, const RECT& rect, RunState state, int radius, HFONT font)
+{
+    const COLORREF tone = StateColor(state);
+    ui::RoundedRect(dc, rect, radius, ui::Mix(color::kPanel, tone, ui::IsDark() ? 24 : 14));
+    ui::Text(dc, std::wstring(1, ui::glyph::kComputer), rect, font, tone, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+std::array<std::wstring, 2> g_statusText;
+
+void SetStatusPart(int part, const std::wstring& text)
+{
+    g_statusText[static_cast<std::size_t>(part)] = text;
+    SendMessageW(g_status, SB_SETTEXTW, static_cast<WPARAM>(part) | SBT_OWNERDRAW | SBT_NOBORDERS, reinterpret_cast<LPARAM>(&g_statusText[static_cast<std::size_t>(part)]));
+    SendMessageW(g_status, SB_SETTIPTEXTW, static_cast<WPARAM>(part), reinterpret_cast<LPARAM>(text.c_str()));
+}
+
 void SetStatus(const std::wstring& text)
 {
-    SendMessageW(g_status, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(text.c_str()));
+    SetStatusPart(0, text);
 }
 
 void UpdateHostStatus()
@@ -119,7 +142,7 @@ void UpdateHostStatus()
     std::wstring text = L"Hôte : " + std::to_wstring(host.logicalCpus) + L" processeurs logiques · " +
                         FormatBytes(static_cast<std::uint64_t>(host.memoryMiB) * 1024 * 1024) + L" · WHP " +
                         (g_whp ? L"actif" : L"indisponible") + L" · 3D " + (g_virgl ? L"disponible" : L"absente");
-    SendMessageW(g_status, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(text.c_str()));
+    SetStatusPart(1, text);
 }
 
 // --- Library and selection ---------------------------------------------------------------------
@@ -159,7 +182,8 @@ void UpdateCommands()
     enable(IdOpenFolder, vm != nullptr);
     enable(IdShowLog, vm != nullptr && PathExists(vm->directory / L"vmm.log"));
     const bool paused = state == RunState::Paused;
-    ui::SetFlatButton(g_buttons[IdPause], paused ? ui::glyph::kPlay : ui::glyph::kPause, paused ? L"Reprendre" : L"Pause");
+    ui::SetFlatButton(g_buttons[IdPause], paused ? ui::glyph::kPlay : ui::glyph::kPause, paused ? L"Reprendre" : L"Pause",
+                      ToolbarColor(IdPause, paused));
     ModifyMenuW(g_menu, IdPause, MF_BYCOMMAND | MF_STRING | (live ? MF_ENABLED : MF_GRAYED), IdPause,
                 paused ? L"&Reprendre" : L"&Pause");
 }
@@ -665,19 +689,20 @@ int PaintDetails(HDC dc, const RECT& client, int scroll, bool draw)
         return Scale(250) + margin * 2;
     }
 
-    // Header: badge, name, system and state.
-    const auto badge = Badge(vm->config);
+    // Header: state tile, name, then state (in its color), system and size.
     int y = margin - scroll;
     RECT badgeRect{margin, y, margin + Scale(60), y + Scale(60)};
     if (draw) {
-        ui::RoundedRect(dc, badgeRect, Scale(12), badge.color);
-        ui::Text(dc, badge.initials, badgeRect, ui::Font().title, RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawStateTile(dc, badgeRect, vm->state, Scale(12), ui::Font().glyphLarge);
         RECT name{badgeRect.right + Scale(16), y + Scale(2), client.right - margin, y + Scale(36)};
         ui::Text(dc, vm->config.name, name, ui::Font().title, color::kText);
         RECT dot{badgeRect.right + Scale(17), y + Scale(43), badgeRect.right + Scale(25), y + Scale(51)};
         ui::Circle(dc, dot, StateColor(vm->state));
         RECT state{dot.right + Scale(8), y + Scale(36), client.right - margin, y + Scale(58)};
-        std::wstring subtitle = StateText(vm->state);
+        const std::wstring stateText = StateText(vm->state);
+        ui::Text(dc, stateText, state, ui::Font().bold, StateColor(vm->state));
+        state.left += ui::TextWidth(dc, stateText, ui::Font().bold);
+        std::wstring subtitle;
         subtitle += L"  ·  " + (vm->config.os.empty() ? std::wstring(L"Linux") : vm->config.os);
         subtitle += L"  ·  " + FormatNumber(vm->config.memoryMiB) + L" Mio, " + std::to_wstring(vm->config.cpus) +
                     (vm->config.cpus > 1 ? L" processeurs" : L" processeur");
@@ -703,7 +728,7 @@ int PaintDetails(HDC dc, const RECT& client, int scroll, bool draw)
         if (draw && box.bottom >= 0 && box.top <= client.bottom) {
             ui::RoundedRect(dc, box, Scale(8), color::kPanel, color::kBorder);
             RECT glyph{box.left + Scale(14), box.top + Scale(12), box.left + Scale(40), box.top + Scale(38)};
-            ui::Text(dc, std::wstring(1, card.glyph), glyph, ui::Font().glyph, color::kAccent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            ui::Text(dc, std::wstring(1, card.glyph), glyph, ui::Font().glyph, PageColor(card.page), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             RECT title{glyph.right + Scale(8), box.top + Scale(12), box.right - Scale(14), box.top + Scale(38)};
             ui::Text(dc, card.title, title, ui::Font().heading, color::kText);
             ui::Fill(dc, RECT{box.left + Scale(14), box.top + Scale(44), box.right - Scale(14), box.top + Scale(45)},
@@ -907,11 +932,9 @@ void DrawListItem(const DRAWITEMSTRUCT& item)
         RECT bar{card.left + Scale(1), card.top + Scale(16), card.left + Scale(4), card.bottom - Scale(16)};
         ui::RoundedRect(dc, bar, Scale(1), color::kAccent);
     }
-    const auto badge = Badge(vm.config);
     const int middle = (card.top + card.bottom) / 2;
     RECT badgeRect{card.left + Scale(14), middle - Scale(20), card.left + Scale(54), middle + Scale(20)};
-    ui::RoundedRect(dc, badgeRect, Scale(8), badge.color);
-    ui::Text(dc, badge.initials, badgeRect, ui::Font().badge, RGB(255, 255, 255), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawStateTile(dc, badgeRect, vm.state, Scale(8), ui::Font().glyph);
     RECT name{badgeRect.right + Scale(12), card.top + Scale(9), card.right - Scale(10), middle + Scale(1)};
     ui::Text(dc, vm.config.name, name, ui::Font().bold, color::kText,
              DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -998,6 +1021,57 @@ void SaveWindowPlacement()
     }
 }
 
+// Toolbar glyph colors: green starts, orange pauses or stops softly, red
+// destroys or cuts power, the accent creates, indigo snapshots.
+COLORREF ToolbarColor(int id, bool paused)
+{
+    switch (id) {
+    case IdNew: return color::kAccent;
+    case IdSnapshots: return color::kIndigo;
+    case IdDelete: return color::kRed;
+    case IdStart: return color::kGreen;
+    case IdPause: return paused ? color::kGreen : color::kOrange;
+    case IdShutdown: return color::kOrange;
+    case IdPowerOff: return color::kRed;
+    default: return CLR_INVALID;
+    }
+}
+
+ui::Theme LoadTheme()
+{
+    wchar_t value[16] = {};
+    GetPrivateProfileStringW(L"manager", L"theme", L"system", value, 16, g_settingsFile.c_str());
+    if (_wcsicmp(value, L"dark") == 0) return ui::Theme::Dark;
+    if (_wcsicmp(value, L"light") == 0) return ui::Theme::Light;
+    return ui::Theme::System;
+}
+
+void UpdateThemeMenu()
+{
+    const auto theme = ui::CurrentTheme();
+    const int checked = theme == ui::Theme::Dark ? IdThemeDark : theme == ui::Theme::Light ? IdThemeLight : IdThemeSystem;
+    CheckMenuRadioItem(g_menu, IdThemeSystem, IdThemeDark, static_cast<UINT>(checked), MF_BYCOMMAND);
+}
+
+// Switches the palette and repaints everything (title bar, menus, controls).
+void ApplyTheme(ui::Theme theme, bool save)
+{
+    ui::SetTheme(theme);
+    ui::ThemeWindow(g_window);
+    ui::ThemeControl(g_list);
+    ui::ThemeControl(g_status);
+    for (const auto& [id, button] : g_buttons) {
+        ui::SetFlatButtonColor(button, ToolbarColor(id, id == IdPause && Selected() != nullptr && Selected()->state == RunState::Paused));
+    }
+    UpdateThemeMenu();
+    if (save) {
+        const wchar_t* name = theme == ui::Theme::Dark ? L"dark" : theme == ui::Theme::Light ? L"light" : L"system";
+        WritePrivateProfileStringW(L"manager", L"theme", name, g_settingsFile.c_str());
+    }
+    DrawMenuBar(g_window);
+    RedrawWindow(g_window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+}
+
 void CreateControls(HWND window)
 {
     g_menu = CreateMenu();
@@ -1022,6 +1096,11 @@ void CreateControls(HWND window)
     AppendMenuW(machine, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(machine, MF_STRING, IdDelete, L"&Supprimer…\tSuppr");
     AppendMenuW(g_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(machine), L"&Machine");
+    HMENU view = CreatePopupMenu();
+    AppendMenuW(view, MF_STRING, IdThemeSystem, L"Thème du &système Windows");
+    AppendMenuW(view, MF_STRING, IdThemeLight, L"Thème &clair");
+    AppendMenuW(view, MF_STRING, IdThemeDark, L"Thème &sombre");
+    AppendMenuW(g_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"A&ffichage");
     HMENU help = CreatePopupMenu();
     AppendMenuW(help, MF_STRING, IdAbout, L"À &propos de Virtualiseur");
     AppendMenuW(g_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Aide");
@@ -1033,14 +1112,14 @@ void CreateControls(HWND window)
         ui::MakeFlatButton(button, glyph, label, glyphColor);
         g_buttons[id] = button;
     };
-    addButton(IdNew, ui::glyph::kAdd, L"Nouvelle", color::kAccent);
+    addButton(IdNew, ui::glyph::kAdd, L"Nouvelle", ToolbarColor(IdNew));
     addButton(IdSettings, ui::glyph::kSettings, L"Configuration");
-    addButton(IdSnapshots, ui::glyph::kCamera, L"Instantanés");
-    addButton(IdDelete, ui::glyph::kDelete, L"Supprimer");
-    addButton(IdStart, ui::glyph::kPlay, L"Démarrer", color::kGreen);
-    addButton(IdPause, ui::glyph::kPause, L"Pause");
-    addButton(IdShutdown, ui::glyph::kPower, L"Arrêt ACPI");
-    addButton(IdPowerOff, ui::glyph::kStop, L"Éteindre", color::kRed);
+    addButton(IdSnapshots, ui::glyph::kCamera, L"Instantanés", ToolbarColor(IdSnapshots));
+    addButton(IdDelete, ui::glyph::kDelete, L"Supprimer", ToolbarColor(IdDelete));
+    addButton(IdStart, ui::glyph::kPlay, L"Démarrer", ToolbarColor(IdStart));
+    addButton(IdPause, ui::glyph::kPause, L"Pause", ToolbarColor(IdPause));
+    addButton(IdShutdown, ui::glyph::kPower, L"Arrêt ACPI", ToolbarColor(IdShutdown));
+    addButton(IdPowerOff, ui::glyph::kStop, L"Éteindre", ToolbarColor(IdPowerOff));
 
     g_list = CreateWindowExW(0, WC_LISTBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY |
                              LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT, 0, 0, 10, 10, window,
@@ -1084,17 +1163,25 @@ void OnCommand(int id)
         break;
     case IdExit: PostMessageW(g_window, WM_CLOSE, 0, 0); break;
     case IdAbout: ShowAbout(); break;
+    case IdThemeSystem: ApplyTheme(ui::Theme::System, true); break;
+    case IdThemeLight: ApplyTheme(ui::Theme::Light, true); break;
+    case IdThemeDark: ApplyTheme(ui::Theme::Dark, true); break;
     default: break;
     }
 }
 
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (LRESULT handled = 0; ui::HandleMenuBar(window, message, wParam, lParam, handled)) return handled;
     switch (message) {
     case WM_CREATE: {
         g_window = window;
         ui::InitTheme(GetDpiForWindow(window));
         CreateControls(window);
+        ui::ThemeWindow(window);
+        ui::ThemeControl(g_list);
+        ui::ThemeControl(g_status);
+        UpdateThemeMenu();
         Layout(); // Status bar parts before their texts.
         g_whp = WhpAvailable();
         g_virgl = VirglAvailable();
@@ -1127,6 +1214,13 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
         info->ptMinTrackSize = {Scale(900), Scale(560)};
         return 0;
     }
+    case WM_SETTINGCHANGE:
+        // "Thème du système" follows the Windows light/dark setting live.
+        if (lParam != 0 && wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0 &&
+            ui::CurrentTheme() == ui::Theme::System) {
+            ApplyTheme(ui::Theme::System, false);
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
     case WM_DPICHANGED: {
         ui::InitTheme(HIWORD(wParam));
         ApplyFonts();
@@ -1158,6 +1252,15 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     }
     case WM_DRAWITEM: {
         const auto& item = *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if (item.hwndItem == g_status) {
+            ui::Fill(item.hDC, item.rcItem, color::kWindow);
+            RECT text = item.rcItem;
+            text.left += Scale(6);
+            if (item.itemID < g_statusText.size()) {
+                ui::Text(item.hDC, g_statusText[item.itemID], text, ui::Font().caption, color::kSecondary);
+            }
+            return TRUE;
+        }
         if (item.CtlType == ODT_LISTBOX && item.CtlID == IdList) {
             DrawListItem(item);
             return TRUE;
@@ -1245,6 +1348,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         LocalFree(arguments);
     }
     g_settingsFile = g_library.parent_path() / L"manager.ini";
+    ui::SetTheme(LoadTheme());
     std::error_code error;
     fs::create_directories(g_library, error);
 
@@ -1274,6 +1378,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
                                   WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                                   bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr, nullptr, instance, nullptr);
     if (window == nullptr) return 2;
+    ui::ThemeWindow(window); // Title bar: DWM takes the dark attribute once the window exists.
 
     WINDOWPLACEMENT placement{};
     if (GetPrivateProfileStructW(L"manager", L"placement", &placement, sizeof(placement), g_settingsFile.c_str()) &&

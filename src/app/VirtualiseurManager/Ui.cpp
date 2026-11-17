@@ -1,9 +1,14 @@
 #include "Ui.h"
 
 #include <commctrl.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <map>
+
+#pragma comment(lib, "Dwmapi.lib")
+#pragma comment(lib, "UxTheme.lib")
 
 namespace Gdiplus {
 using std::max;
@@ -258,6 +263,12 @@ void SetFlatButton(HWND button, wchar_t glyph, const std::wstring& label, COLORR
     InvalidateRect(button, nullptr, FALSE);
 }
 
+void SetFlatButtonColor(HWND button, COLORREF glyphColor)
+{
+    g_flatButtons[button].glyphColor = glyphColor;
+    InvalidateRect(button, nullptr, FALSE);
+}
+
 bool DrawFlatButton(const DRAWITEMSTRUCT& item, COLORREF background)
 {
     const auto found = g_flatButtons.find(item.hwndItem);
@@ -291,6 +302,261 @@ bool DrawFlatButton(const DRAWITEMSTRUCT& item, COLORREF background)
         RoundedRect(dc, focus, Scale(6), CLR_INVALID, color::kAccent);
     }
     return true;
+}
+
+// --- Theme ---------------------------------------------------------------------------------------
+
+namespace {
+
+Theme g_theme = Theme::System;
+bool g_dark = false;
+
+bool WindowsUsesDarkApps()
+{
+    DWORD value = 1;
+    DWORD size = sizeof(value);
+    const LSTATUS status = RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                                        L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+    return status == ERROR_SUCCESS && value == 0;
+}
+
+// uxtheme exports, by ordinal only (Windows 10 1903+): dark popup menus.
+void SetMenuMode(bool dark)
+{
+    using SetPreferredAppMode = int(WINAPI*)(int);
+    using FlushMenuThemes = void(WINAPI*)();
+    static const HMODULE uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (uxtheme == nullptr) return;
+    const auto setMode = reinterpret_cast<SetPreferredAppMode>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(135)));
+    const auto flush = reinterpret_cast<FlushMenuThemes>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(136)));
+    if (setMode != nullptr) setMode(dark ? 2 /* ForceDark */ : 3 /* ForceLight */);
+    if (flush != nullptr) flush();
+}
+
+} // namespace
+
+void SetTheme(Theme theme)
+{
+    g_theme = theme;
+    g_dark = theme == Theme::Dark || (theme == Theme::System && WindowsUsesDarkApps());
+    using namespace color;
+    if (g_dark) {
+        // Windows 11 dark: layered greys, lighter accents for contrast.
+        kWindow = RGB(32, 32, 32);
+        kPanel = RGB(43, 43, 43);
+        kBorder = RGB(62, 62, 62);
+        kText = RGB(242, 242, 242);
+        kSecondary = RGB(170, 170, 170);
+        kAccent = RGB(96, 205, 255);
+        kAccentSoft = RGB(30, 58, 80);
+        kHover = RGB(56, 56, 56);
+        kPressed = RGB(66, 66, 66);
+        kGreen = RGB(108, 203, 95);
+        kOrange = RGB(252, 180, 70);
+        kRed = RGB(255, 110, 100);
+        kDisabled = RGB(105, 105, 105);
+        kPurple = RGB(214, 153, 245);
+        kTeal = RGB(72, 210, 200);
+        kPink = RGB(255, 128, 200);
+        kAmber = RGB(255, 200, 90);
+        kIndigo = RGB(160, 160, 255);
+        kSlate = RGB(165, 175, 190);
+    } else {
+        kWindow = RGB(243, 243, 243);
+        kPanel = RGB(255, 255, 255);
+        kBorder = RGB(224, 224, 224);
+        kText = RGB(26, 26, 26);
+        kSecondary = RGB(96, 96, 96);
+        kAccent = RGB(0, 103, 192);
+        kAccentSoft = RGB(230, 241, 251);
+        kHover = RGB(235, 235, 235);
+        kPressed = RGB(222, 222, 222);
+        kGreen = RGB(16, 124, 16);
+        kOrange = RGB(202, 120, 0);
+        kRed = RGB(196, 43, 28);
+        kDisabled = RGB(165, 165, 165);
+        kPurple = RGB(136, 23, 152);
+        kTeal = RGB(0, 120, 120);
+        kPink = RGB(191, 0, 119);
+        kAmber = RGB(157, 93, 0);
+        kIndigo = RGB(79, 70, 229);
+        kSlate = RGB(90, 98, 112);
+    }
+    SetMenuMode(g_dark);
+}
+
+Theme CurrentTheme() { return g_theme; }
+bool IsDark() { return g_dark; }
+
+void ThemeWindow(HWND window)
+{
+    const BOOL dark = g_dark ? TRUE : FALSE;
+    constexpr DWORD kImmersiveDarkMode = 20; // DWMWA_USE_IMMERSIVE_DARK_MODE.
+    DwmSetWindowAttribute(window, kImmersiveDarkMode, &dark, sizeof(dark));
+    SetWindowTheme(window, g_dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+}
+
+namespace {
+
+// The 3D client edge of edits and lists is drawn with system (light) colors:
+// in the dark theme it is repainted with the theme's border color.
+LRESULT CALLBACK ClientEdgeProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
+{
+    if (message == WM_NCPAINT) {
+        const LRESULT result = DefSubclassProc(window, message, wParam, lParam);
+        if (g_dark && (GetWindowLongW(window, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) != 0) {
+            const HDC dc = GetWindowDC(window);
+            RECT rect{};
+            GetWindowRect(window, &rect);
+            OffsetRect(&rect, -rect.left, -rect.top);
+            FrameRect(dc, &rect, Brush(color::kBorder));
+            InflateRect(&rect, -1, -1);
+            FrameRect(dc, &rect, Brush(color::kPanel));
+            ReleaseDC(window, dc);
+        }
+        return result;
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, &ClientEdgeProc, 2);
+    return DefSubclassProc(window, message, wParam, lParam);
+}
+
+} // namespace
+
+void ThemeControl(HWND control)
+{
+    wchar_t name[32] = {};
+    GetClassNameW(control, name, 32);
+    const std::wstring kind = name;
+    if (kind == L"Edit" || kind == WC_COMBOBOXW) {
+        SetWindowTheme(control, g_dark ? L"DarkMode_CFD" : nullptr, nullptr);
+    } else if (kind == L"ListBox" || kind == L"Button" || kind == L"ScrollBar") {
+        SetWindowTheme(control, g_dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+    } else if (kind == STATUSCLASSNAMEW) {
+        // Unthemed so that SB_SETBKCOLOR applies; its text is owner-drawn.
+        SetWindowTheme(control, L"", L"");
+        SendMessageW(control, SB_SETBKCOLOR, 0, static_cast<LPARAM>(color::kWindow));
+    }
+    if (kind == L"Edit" || kind == L"ListBox") SetWindowSubclass(control, &ClientEdgeProc, 2, 0); // Dark client edge.
+    SetWindowPos(control, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    InvalidateRect(control, nullptr, TRUE);
+}
+
+COLORREF Mix(COLORREF a, COLORREF b, int percent)
+{
+    const auto blend = [percent](int x, int y) { return (x * (100 - percent) + y * percent) / 100; };
+    return RGB(blend(GetRValue(a), GetRValue(b)), blend(GetGValue(a), GetGValue(b)), blend(GetBValue(a), GetBValue(b)));
+}
+
+LRESULT DrawCheckBox(const NMCUSTOMDRAW& draw, COLORREF background)
+{
+    if (draw.dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;
+    const HWND button = draw.hdr.hwndFrom;
+    const bool checked = SendMessageW(button, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool enabled = IsWindowEnabled(button) != FALSE;
+    const bool hot = (draw.uItemState & CDIS_HOT) != 0;
+    const bool focused = (draw.uItemState & CDIS_FOCUS) != 0 && (SendMessageW(button, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS) == 0;
+    const HDC dc = draw.hdc;
+    const RECT client = draw.rc;
+    Fill(dc, client, background);
+    const int size = Scale(18);
+    const int top = (client.top + client.bottom - size) / 2;
+    RECT box{client.left + Scale(1), top, client.left + Scale(1) + size, top + size};
+    if (checked) {
+        RoundedRect(dc, box, Scale(4), enabled ? (hot ? Mix(color::kAccent, color::kText, 15) : color::kAccent) : color::kDisabled);
+        Text(dc, std::wstring(1, glyph::kCheck), box, Font().caption, g_dark ? RGB(0, 0, 0) : RGB(255, 255, 255),
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else {
+        RoundedRect(dc, box, Scale(4), hot && enabled ? color::kHover : background,
+                    enabled ? color::kSecondary : color::kDisabled);
+    }
+    wchar_t label[256] = {};
+    GetWindowTextW(button, label, 256);
+    RECT text{box.right + Scale(8), client.top, client.right, client.bottom};
+    const auto font = reinterpret_cast<HFONT>(SendMessageW(button, WM_GETFONT, 0, 0));
+    Text(dc, label, text, font != nullptr ? font : Font().body, enabled ? color::kText : color::kDisabled,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_HIDEPREFIX);
+    if (focused) RoundedRect(dc, RECT{box.left - Scale(1), box.top - Scale(1), box.right + Scale(1), box.bottom + Scale(1)},
+                             Scale(5), CLR_INVALID, color::kText);
+    return CDRF_SKIPDEFAULT;
+}
+
+namespace {
+
+// Undocumented menu-bar drawing messages (as used by Windows itself).
+constexpr UINT kUahDrawMenu = 0x0091;
+constexpr UINT kUahDrawMenuItem = 0x0092;
+struct UahMenu {
+    HMENU menu;
+    HDC dc;
+    DWORD flags;
+};
+struct UahMenuItem {
+    int position;
+    DWORD metrics[8];
+    DWORD popupMetrics[5];
+};
+struct UahDrawMenuItem {
+    DRAWITEMSTRUCT draw;
+    UahMenu menu;
+    UahMenuItem item;
+};
+
+RECT MenuBarRect(HWND window)
+{
+    MENUBARINFO info{sizeof(info)};
+    GetMenuBarInfo(window, OBJID_MENU, 0, &info);
+    RECT bounds{};
+    GetWindowRect(window, &bounds);
+    RECT bar = info.rcBar;
+    OffsetRect(&bar, -bounds.left, -bounds.top);
+    return bar;
+}
+
+} // namespace
+
+bool HandleMenuBar(HWND window, UINT message, WPARAM wParam, LPARAM lParam, LRESULT& result)
+{
+    if (!g_dark) return false;
+    switch (message) {
+    case kUahDrawMenu: {
+        const auto* menu = reinterpret_cast<const UahMenu*>(lParam);
+        RECT bar = MenuBarRect(window);
+        bar.top -= 1; // Covers the light line Windows leaves above the bar.
+        Fill(menu->dc, bar, color::kPanel);
+        result = 0;
+        return true;
+    }
+    case kUahDrawMenuItem: {
+        const auto* item = reinterpret_cast<const UahDrawMenuItem*>(lParam);
+        wchar_t text[128] = {};
+        MENUITEMINFOW info{sizeof(info)};
+        info.fMask = MIIM_STRING;
+        info.dwTypeData = text;
+        info.cch = 127;
+        GetMenuItemInfoW(item->menu.menu, static_cast<UINT>(item->item.position), TRUE, &info);
+        const UINT state = item->draw.itemState;
+        const bool active = (state & (ODS_HOTLIGHT | ODS_SELECTED)) != 0;
+        Fill(item->draw.hDC, item->draw.rcItem, active ? color::kHover : color::kPanel);
+        RECT rect = item->draw.rcItem;
+        Text(item->draw.hDC, text, rect, Font().body,
+             (state & (ODS_INACTIVE | ODS_DISABLED | ODS_GRAYED)) != 0 ? color::kDisabled : color::kText,
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE | ((state & ODS_NOACCEL) != 0 ? DT_HIDEPREFIX : 0));
+        result = 0;
+        return true;
+    }
+    case WM_NCPAINT:
+    case WM_NCACTIVATE: {
+        // Windows paints a light line under the menu bar: paint over it.
+        result = DefWindowProcW(window, message, wParam, lParam);
+        const HDC dc = GetWindowDC(window);
+        const RECT bar = MenuBarRect(window);
+        Fill(dc, RECT{bar.left, bar.bottom, bar.right, bar.bottom + 1}, color::kPanel);
+        ReleaseDC(window, dc);
+        return true;
+    }
+    default:
+        return false;
+    }
 }
 
 BufferedPaint::BufferedPaint(HDC target, const RECT& rect) : target_(target), rect_(rect)

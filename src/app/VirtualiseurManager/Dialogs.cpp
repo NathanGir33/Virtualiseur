@@ -461,6 +461,7 @@ public:
         CreateWindowExW(exStyle, L"VirtualiseurForm", title.c_str(), style, x, y, windowWidth, windowHeight,
                         owner, nullptr, GetModuleHandleW(nullptr), this);
         if (window_ == nullptr) return false;
+        ui::ThemeWindow(window_); // Dark or light title bar.
         Build();
         ShowPage(page_);
         OnPageShown(page_);
@@ -507,6 +508,7 @@ protected:
                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font != nullptr ? font : ui::Font().body), TRUE);
         if (id > 0) items_[id] = control;
+        ui::ThemeControl(control);
         paged_.emplace_back(page, control);
         return control;
     }
@@ -723,15 +725,32 @@ private:
             SetBkMode(dc, TRANSPARENT);
             return reinterpret_cast<LRESULT>(ui::Brush(color::kPanel));
         }
-        case WM_CTLCOLORLISTBOX:
-            // The category list sits on the grey side pane; other lists
-            // (and combo box drop-downs) are white.
-            return reinterpret_cast<LRESULT>(ui::Brush(reinterpret_cast<HWND>(lParam) == Item(IdCategories)
-                                                           ? color::kWindow : color::kPanel));
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX: {
+            // The category list sits on the side pane; other lists, edits and
+            // combo box drop-downs are on the panel color.
+            const auto dc = reinterpret_cast<HDC>(wParam);
+            const COLORREF background = reinterpret_cast<HWND>(lParam) == Item(IdCategories) ? color::kWindow : color::kPanel;
+            SetTextColor(dc, color::kText);
+            SetBkColor(dc, background);
+            return reinterpret_cast<LRESULT>(ui::Brush(background));
+        }
+        case WM_NOTIFY: {
+            const auto* header = reinterpret_cast<const NMHDR*>(lParam);
+            if (header->code == NM_CUSTOMDRAW &&
+                (GetWindowLongW(header->hwndFrom, GWL_STYLE) & BS_TYPEMASK) == BS_AUTOCHECKBOX) {
+                wchar_t kind[16] = {};
+                GetClassNameW(header->hwndFrom, kind, 16);
+                if (_wcsicmp(kind, L"Button") == 0) {
+                    return ui::DrawCheckBox(*reinterpret_cast<const NMCUSTOMDRAW*>(lParam), color::kPanel);
+                }
+            }
+            break;
+        }
         case WM_MEASUREITEM: {
             auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
             if (measure->CtlType == ODT_LISTBOX) {
-                measure->itemHeight = static_cast<UINT>(Scale(38));
+                measure->itemHeight = static_cast<UINT>(Scale(measure->CtlID == IdSnapshotList ? 30 : 38));
                 return TRUE;
             }
             break;
@@ -806,9 +825,9 @@ private:
         };
         const int greenEnd = toX((std::min)(slider.spec.green, slider.spec.maximum));
         const int orangeEnd = toX((std::min)((std::max)(slider.spec.orange, slider.spec.green), slider.spec.maximum));
-        ui::Fill(dc, RECT{left, top, greenEnd, bottom}, RGB(108, 190, 108));
-        if (orangeEnd > greenEnd) ui::Fill(dc, RECT{greenEnd, top, orangeEnd, bottom}, RGB(240, 180, 80));
-        if (right > orangeEnd) ui::Fill(dc, RECT{orangeEnd, top, right, bottom}, RGB(230, 110, 100));
+        ui::Fill(dc, RECT{left, top, greenEnd, bottom}, ui::Mix(color::kPanel, color::kGreen, 60));
+        if (orangeEnd > greenEnd) ui::Fill(dc, RECT{greenEnd, top, orangeEnd, bottom}, ui::Mix(color::kPanel, color::kOrange, 60));
+        if (right > orangeEnd) ui::Fill(dc, RECT{orangeEnd, top, right, bottom}, ui::Mix(color::kPanel, color::kRed, 60));
     }
 
     struct Heading {
@@ -1098,7 +1117,7 @@ private:
             ui::RoundedRect(dc, bar, Scale(1), color::kAccent);
         }
         RECT glyphRect{box.left + Scale(12), box.top, box.left + Scale(40), box.bottom};
-        ui::Text(dc, std::wstring(1, category.glyph), glyphRect, ui::Font().glyph, selected ? color::kAccent : color::kSecondary,
+        ui::Text(dc, std::wstring(1, category.glyph), glyphRect, ui::Font().glyph, PageColor(static_cast<int>(item.itemID)),
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         RECT textRect{box.left + Scale(48), box.top, box.right - Scale(4), box.bottom};
         ui::Text(dc, category.title, textRect, selected ? ui::Font().bold : ui::Font().body, color::kText);
@@ -1808,7 +1827,9 @@ private:
                       L"et la machine redémarre dans cet état. Supprimer un instantané ne change ni l'état actuel ni "
                       L"les autres instantanés.",
                   kLeft, 18, kRight - kLeft, 40, ui::Font().caption, color::kSecondary);
-        AddList(-1, IdSnapshotList, kLeft, 64, kRight - kLeft, 250);
+        // Owner-drawn tree: one colored marker per snapshot (how it was taken).
+        Add(-1, IdSnapshotList, WC_LISTBOXW, L"", WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+            kLeft, 64, kRight - kLeft, 250, WS_EX_CLIENTEDGE);
         AddStatic(-1, L"", kLeft, 322, kRight - kLeft, 40, ui::Font().caption, CLR_INVALID, SS_LEFT, IdSnapshotDetail);
         AddLabel(-1, L"Nouvel instantané :", kLeft, 378, 150);
         AddEdit(-1, IdSnapshotName, L"", kLeft + 150, 376, kRight - kLeft - 150 - 150);
@@ -2039,6 +2060,58 @@ private:
             SetMessage(wide);
             MessageBeep(MB_ICONWARNING);
         }
+    }
+
+    // One tree row: indentation, a marker colored by how the snapshot was
+    // taken (indigo: machine off, green: frozen, orange: without freeze),
+    // name, then date and state on the right. The current state is accent blue.
+    bool DrawItem(const DRAWITEMSTRUCT& item) override
+    {
+        if (item.CtlID != IdSnapshotList) return false;
+        ui::BufferedPaint buffer(item.hDC, item.rcItem);
+        const HDC dc = buffer.Dc();
+        const bool selected = (item.itemState & ODS_SELECTED) != 0;
+        ui::Fill(dc, item.rcItem, selected ? color::kAccentSoft : color::kPanel);
+        if (item.itemID >= rows_.size()) return true;
+        const auto& row = rows_[item.itemID];
+        RECT rect = item.rcItem;
+        rect.left += Scale(10) + row.depth * Scale(22);
+        rect.right -= Scale(10);
+        const int middle = (rect.top + rect.bottom) / 2;
+        if (row.depth > 0) {
+            // Elbow joining the row to its parent.
+            const int x = rect.left - Scale(13);
+            ui::Fill(dc, RECT{x, rect.top, x + 1, middle + 1}, color::kBorder);
+            ui::Fill(dc, RECT{x, middle, rect.left - Scale(3), middle + 1}, color::kBorder);
+        }
+        if (row.id == 0) {
+            RECT marker{rect.left, middle - Scale(8), rect.left + Scale(16), middle + Scale(8)};
+            ui::Text(dc, std::wstring(1, ui::glyph::kPlay), marker, ui::Font().glyph, color::kAccent,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            RECT text{marker.right + Scale(8), rect.top, rect.right, rect.bottom};
+            ui::Text(dc, stopped_ ? L"État actuel" : L"État actuel (machine allumée)", text, ui::Font().bold, color::kAccent);
+            return true;
+        }
+        const auto* snapshot = FindSnapshot(row.id);
+        if (snapshot == nullptr) return true;
+        const bool frozen = snapshot->state == L"frozen";
+        const bool crash = snapshot->state == L"crash";
+        const COLORREF tone = frozen ? color::kGreen : crash ? color::kOrange : color::kIndigo;
+        RECT dot{rect.left + Scale(3), middle - Scale(5), rect.left + Scale(13), middle + Scale(5)};
+        ui::Circle(dc, dot, tone);
+        // Right column: state, then date.
+        const std::wstring stateText = frozen ? L"allumée, gelée" : crash ? L"allumée, sans gel" : L"";
+        RECT date{rect.right - Scale(150), rect.top, rect.right, rect.bottom};
+        ui::Text(dc, snapshot->date, date, ui::Font().caption, color::kSecondary, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        int nameRight = date.left - Scale(8);
+        if (!stateText.empty()) {
+            RECT state{date.left - Scale(130), rect.top, date.left - Scale(10), rect.bottom};
+            ui::Text(dc, stateText, state, ui::Font().caption, tone, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            nameRight = state.left - Scale(8);
+        }
+        RECT name{dot.right + Scale(10), rect.top, nameRight, rect.bottom};
+        ui::Text(dc, snapshot->name, name, ui::Font().body, color::kText);
+        return true;
     }
 
     // Tree order: each snapshot under the one it derives from; "État actuel"
