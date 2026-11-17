@@ -107,6 +107,7 @@
     <ClInclude Include="core\Bus.h" />
     <ClInclude Include="core\Log.h" />
     <ClInclude Include="core\GuestMemory.h" />
+    <ClInclude Include="core\DirtyRows.h" />
     <ClInclude Include="devices\AcpiPm.h" />
     <ClInclude Include="devices\IdeController.h" />
     <ClInclude Include="devices\IoApic.h" />

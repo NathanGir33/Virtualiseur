@@ -43,6 +43,43 @@ GuestMemory::GuestMemory(virtualiseur::whp::Partition& partition,
     if (highRamBytes_ != 0) e820_.push_back({kFourGiB, highRamBytes_, 1});
 }
 
+void GuestMemory::FramebufferDirtyRows(std::uint32_t stride, std::uint32_t height, DirtyRows& rows) const
+{
+    if (framebuffer_ == nullptr || stride == 0) return;
+    std::vector<std::uint64_t> bitmap;
+    if (!partition_.QueryDirtyPages(layout::kFramebufferBase, framebufferBytes_, bitmap)) {
+        rows.Add(0, height);
+        return;
+    }
+    const auto addRun = [&](std::uint64_t firstPage, std::uint64_t endPage) {
+        const auto first = firstPage * 4096;
+        const auto last = endPage * 4096;
+        rows.Add(static_cast<std::uint32_t>(first / stride),
+                 static_cast<std::uint32_t>((std::min<std::uint64_t>)(height, (last + stride - 1) / stride)));
+    };
+    // Runs of consecutive dirty pages become bands.
+    std::uint64_t runStart = 0;
+    bool inRun = false;
+    const auto pages = static_cast<std::uint64_t>(bitmap.size()) * 64;
+    for (std::uint64_t page = 0; page < pages; ++page) {
+        const auto word = bitmap[static_cast<std::size_t>(page / 64)];
+        if (word == 0 && !inRun) {
+            page += 63 - (page % 64); // Skip clean words quickly.
+            continue;
+        }
+        const bool dirty = (word & (1ull << (page % 64))) != 0;
+        if (dirty && !inRun) {
+            runStart = page;
+            inRun = true;
+        } else if (!dirty && inRun) {
+            addRun(runStart, page);
+            inRun = false;
+        }
+    }
+    if (inRun) addRun(runStart, pages);
+    rows.Clip(height);
+}
+
 bool GuestMemory::Read(std::uint64_t gpa, void* destination, std::size_t size) const noexcept
 {
     auto* output = static_cast<std::uint8_t*>(destination);

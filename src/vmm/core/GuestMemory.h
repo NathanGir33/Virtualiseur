@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DirtyRows.h"
 #include "WindowsHypervisorBackend.h"
 
 #include <atomic>
@@ -76,39 +77,11 @@ public:
     const std::vector<E820Entry>& E820() const noexcept { return e820_; }
 
     std::uint8_t* Framebuffer() const noexcept { return framebuffer_; }
-    // True if the guest wrote to the framebuffer since the previous call (or
-    // if dirty-page tracking is unavailable on this host).
-    bool FramebufferChanged() const
-    {
-        std::uint64_t first = 0;
-        std::uint64_t last = 0;
-        return FramebufferDirtyRange(first, last);
-    }
 
-    // Byte range [first, last) of the framebuffer written since the previous
-    // query. Without dirty tracking the whole framebuffer is reported.
-    bool FramebufferDirtyRange(std::uint64_t& first, std::uint64_t& last) const
-    {
-        std::vector<std::uint64_t> bitmap;
-        if (!partition_.QueryDirtyPages(layout::kFramebufferBase, framebufferBytes_, bitmap)) {
-            first = 0;
-            last = framebufferBytes_;
-            return true;
-        }
-        bool any = false;
-        for (std::size_t word = 0; word < bitmap.size(); ++word) {
-            if (bitmap[word] == 0) continue;
-            for (std::size_t bit = 0; bit < 64; ++bit) {
-                if ((bitmap[word] & (1ull << bit)) == 0) continue;
-                const auto page = static_cast<std::uint64_t>(word * 64 + bit);
-                if (!any) first = page * 4096;
-                last = (page + 1) * 4096;
-                any = true;
-            }
-        }
-        if (last > framebufferBytes_) last = framebufferBytes_;
-        return any;
-    }
+    // Adds to `rows` the framebuffer rows written since the previous query,
+    // one band per run of dirty pages. Without dirty tracking the whole
+    // framebuffer is reported.
+    void FramebufferDirtyRows(std::uint32_t stride, std::uint32_t height, DirtyRows& rows) const;
     std::uint64_t FramebufferBytes() const noexcept { return framebufferBytes_; }
 
 private:

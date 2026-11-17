@@ -58,9 +58,9 @@ public:
 
     // UI side (any thread, no device lock). Returns false while the guest
     // driver shows nothing (the boot framebuffer is then the screen). Copies
-    // the rows changed since the previous call into `copy`; [top, bottom) is
-    // empty when nothing changed.
-    bool CopyScanout(ScanoutCopy& copy, std::uint32_t& top, std::uint32_t& bottom);
+    // the rows changed since the previous call into `copy` and adds them to
+    // `rows`.
+    bool CopyScanout(ScanoutCopy& copy, DirtyRows& rows);
     // Copies the cursor state; the image is copied only when its serial
     // differs from `cursor.shapeSerial`. Returns true if anything changed.
     bool CursorSnapshot(GpuCursor& cursor);
@@ -158,8 +158,7 @@ private:
     Rect scanoutRect_{};
     bool scanoutActive_ = false;
     bool fullCopy_ = true;
-    std::uint32_t dirtyTop_ = 0;
-    std::uint32_t dirtyBottom_ = 0;
+    DirtyRows dirty_; // Scanout rows flushed since the last copy.
     GpuCursor cursor_;
 
     std::atomic_uint64_t flushes_ = 0;

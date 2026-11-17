@@ -62,11 +62,10 @@ private:
     void ArmFrameTimer();
     // Direct2D renderer for graphics mode: GPU scaling, whole window drawn per
     // frame. Returns false when Direct2D is unavailable (GDI fallback).
-    bool RenderGraphics(const DisplaySnapshot& snapshot, std::uint32_t top, std::uint32_t bottom, bool dirty);
+    bool RenderGraphics(const DisplaySnapshot& snapshot, const DirtyRows& rows);
     // Graphics source: the virtio-gpu scanout once the guest driver runs,
     // the boot framebuffer before. Fills the changed rows when `queryDirty`.
-    bool GraphicsSnapshot(Vm& vm, DisplaySnapshot& snapshot, std::uint32_t& top, std::uint32_t& bottom,
-                          bool& dirty, bool queryDirty);
+    bool GraphicsSnapshot(Vm& vm, DisplaySnapshot& snapshot, DirtyRows& rows, bool queryDirty);
     // Guest cursor plane: a Windows cursor in tablet mode, drawn otherwise.
     bool DrawsGuestCursor() const noexcept { return gpuMode_ && cursor_.visible && !tabletActive_; }
     void UpdateGuestCursor(bool shapeChanged);

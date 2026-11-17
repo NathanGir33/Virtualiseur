@@ -123,24 +123,15 @@ public:
     const std::string& BootDescription() const noexcept { return bootDescription_; }
     bool CdromEjected() const;
     DisplaySnapshot Display() const;
-    // True when the guest framebuffer changed since the previous call.
-    bool FramebufferDirty() const { return memory_->Framebuffer() == nullptr || memory_->FramebufferChanged(); }
-    // Rows [top, bottom) of the framebuffer changed since the previous call.
-    bool FramebufferDirtyRows(std::uint32_t& top, std::uint32_t& bottom) const
+    // Adds the boot framebuffer rows changed since the previous call.
+    void FramebufferDirtyRows(DirtyRows& rows) const
     {
-        if (!framebuffer_ || memory_->Framebuffer() == nullptr) return false;
-        std::uint64_t first = 0;
-        std::uint64_t last = 0;
-        if (!memory_->FramebufferDirtyRange(first, last)) return false;
-        top = static_cast<std::uint32_t>(first / framebuffer_->stride);
-        bottom = static_cast<std::uint32_t>((std::min<std::uint64_t>)(framebuffer_->height,
-            (last + framebuffer_->stride - 1) / framebuffer_->stride));
-        return bottom > top;
+        if (framebuffer_) memory_->FramebufferDirtyRows(framebuffer_->stride, framebuffer_->height, rows);
     }
 
     // virtio-gpu screen (thread-safe). CopyGpuScanout returns false while
     // the guest shows the boot framebuffer instead.
-    bool CopyGpuScanout(ScanoutCopy& copy, std::uint32_t& top, std::uint32_t& bottom);
+    bool CopyGpuScanout(ScanoutCopy& copy, DirtyRows& rows);
     bool GpuCursorSnapshot(GpuCursor& cursor);
     // Asks the guest to adopt this resolution (window resized).
     void RequestDisplaySize(std::uint32_t width, std::uint32_t height);

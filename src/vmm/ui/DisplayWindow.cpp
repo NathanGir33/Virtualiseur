@@ -250,11 +250,10 @@ void DisplayWindow::OnFrame(bool fromTimerMessage)
     }
 
     DisplaySnapshot snapshot;
-    std::uint32_t top = 0;
-    std::uint32_t bottom = 0;
-    bool dirty = false;
+    DirtyRows rows;
     const bool wasGpu = gpuMode_;
-    if (!GraphicsSnapshot(*vm, snapshot, top, bottom, dirty, true)) return;
+    if (!GraphicsSnapshot(*vm, snapshot, rows, true)) return;
+    const bool dirty = !rows.Empty();
     if (wasGpu != gpuMode_) {
         InvalidateRect(window_, nullptr, FALSE);
         return;
@@ -269,9 +268,9 @@ void DisplayWindow::OnFrame(bool fromTimerMessage)
         }
     }
     if (!dirty && !uploadAll_ && !cursorMoved) return;
-    if (RenderGraphics(snapshot, top, bottom, dirty)) return;
+    if (RenderGraphics(snapshot, rows)) return;
 
-    // GDI fallback: invalidate only the window band showing the changed rows.
+    // GDI fallback: invalidate only the window bands showing the changed rows.
     if (!dirty) {
         InvalidateRect(window_, nullptr, FALSE);
         return;
@@ -280,20 +279,19 @@ void DisplayWindow::OnFrame(bool fromTimerMessage)
     GetClientRect(window_, &client);
     const auto target = FitRect(client, snapshot.width, snapshot.height);
     const double scale = static_cast<double>(target.bottom - target.top) / snapshot.height;
-    RECT band{target.left, target.top + static_cast<LONG>(top * scale) - 2,
-              target.right, target.top + static_cast<LONG>(bottom * scale) + 3};
-    InvalidateRect(window_, &band, FALSE);
+    for (const auto& changed : rows.Bands()) {
+        RECT band{target.left, target.top + static_cast<LONG>(changed.top * scale) - 2,
+                  target.right, target.top + static_cast<LONG>(changed.bottom * scale) + 3};
+        InvalidateRect(window_, &band, FALSE);
+    }
 }
 
-bool DisplayWindow::GraphicsSnapshot(Vm& vm, DisplaySnapshot& snapshot, std::uint32_t& top, std::uint32_t& bottom,
-                                     bool& dirty, bool queryDirty)
+bool DisplayWindow::GraphicsSnapshot(Vm& vm, DisplaySnapshot& snapshot, DirtyRows& rows, bool queryDirty)
 {
-    top = 0;
-    bottom = 0;
-    dirty = false;
+    rows.Clear();
     // The scanout copy always consumes the guest's changes: they must reach
     // the bitmap even when called from WM_PAINT.
-    if (vm.CopyGpuScanout(gpuCopy_, top, bottom)) {
+    if (vm.CopyGpuScanout(gpuCopy_, rows)) {
         if (!gpuMode_) {
             gpuMode_ = true;
             uploadAll_ = true;
@@ -306,7 +304,6 @@ bool DisplayWindow::GraphicsSnapshot(Vm& vm, DisplaySnapshot& snapshot, std::uin
         snapshot.width = gpuCopy_.width;
         snapshot.height = gpuCopy_.height;
         snapshot.stride = gpuCopy_.width * 4;
-        dirty = bottom > top;
     } else {
         if (gpuMode_) {
             gpuMode_ = false;
@@ -314,7 +311,7 @@ bool DisplayWindow::GraphicsSnapshot(Vm& vm, DisplaySnapshot& snapshot, std::uin
         }
         snapshot = vm.Display();
         if (snapshot.mode != DisplayMode::Graphics || snapshot.framebuffer == nullptr) return false;
-        if (queryDirty) dirty = vm.FramebufferDirtyRows(top, bottom);
+        if (queryDirty) vm.FramebufferDirtyRows(rows);
     }
     if (snapshot.width != screenWidth_ || snapshot.height != screenHeight_) {
         screenWidth_ = snapshot.width;
@@ -541,13 +538,13 @@ void DisplayWindow::ReleaseD2D()
     uploadAll_ = true;
 }
 
-bool DisplayWindow::RenderGraphics(const DisplaySnapshot& snapshot, std::uint32_t top, std::uint32_t bottom, bool dirty)
+bool DisplayWindow::RenderGraphics(const DisplaySnapshot& snapshot, const DirtyRows& rows)
 {
     if (!EnsureD2D()) return false;
     RECT client{};
     GetClientRect(window_, &client);
     if (client.right <= client.left || client.bottom <= client.top) {
-        uploadAll_ = uploadAll_ || dirty; // Minimized: catch up when shown again.
+        uploadAll_ = uploadAll_ || !rows.Empty(); // Minimized: catch up when shown again.
         return true;
     }
 
@@ -571,10 +568,12 @@ bool DisplayWindow::RenderGraphics(const DisplaySnapshot& snapshot, std::uint32_
     if (uploadAll_) {
         if (FAILED(d2dBitmap_->CopyFromMemory(nullptr, snapshot.framebuffer, snapshot.stride))) return true;
         uploadAll_ = false;
-    } else if (dirty) {
-        const auto rows = D2D1::RectU(0, top, snapshot.width, bottom);
-        (void)d2dBitmap_->CopyFromMemory(&rows, snapshot.framebuffer + static_cast<std::size_t>(top) * snapshot.stride,
-                                         snapshot.stride);
+    } else {
+        for (const auto& band : rows.Bands()) {
+            const auto area = D2D1::RectU(0, band.top, snapshot.width, band.bottom);
+            (void)d2dBitmap_->CopyFromMemory(&area,
+                snapshot.framebuffer + static_cast<std::size_t>(band.top) * snapshot.stride, snapshot.stride);
+        }
     }
 
     const auto target = FitRect(client, snapshot.width, snapshot.height);
@@ -894,17 +893,15 @@ void DisplayWindow::Paint()
         tabletButtons_ = 0;
     }
     DisplaySnapshot snapshot;
-    std::uint32_t top = 0;
-    std::uint32_t bottom = 0;
-    bool dirty = false;
+    DirtyRows rows;
     if (vm) {
         snapshot = vm->Display();
-        if (snapshot.mode == DisplayMode::Graphics) (void)GraphicsSnapshot(*vm, snapshot, top, bottom, dirty, false);
+        if (snapshot.mode == DisplayMode::Graphics) (void)GraphicsSnapshot(*vm, snapshot, rows, false);
     }
     const bool graphics = snapshot.mode == DisplayMode::Graphics && snapshot.framebuffer != nullptr;
     if (graphics) {
         // Direct2D redraws the whole window each frame: nothing to clip.
-        if (RenderGraphics(snapshot, top, bottom, dirty)) {
+        if (RenderGraphics(snapshot, rows)) {
             ValidateRect(window_, nullptr);
             return;
         }

@@ -483,13 +483,7 @@ std::uint32_t VirtioGpu::Flush(const std::vector<std::uint8_t>& request)
     const auto bottom = static_cast<std::uint32_t>((std::min<std::uint64_t>)(
         static_cast<std::uint64_t>(rect.y) + rect.height, static_cast<std::uint64_t>(screen.y) + screen.height));
     if (bottom <= top) return kRespOkNoData;
-    if (dirtyBottom_ <= dirtyTop_) {
-        dirtyTop_ = top - screen.y;
-        dirtyBottom_ = bottom - screen.y;
-    } else {
-        dirtyTop_ = (std::min)(dirtyTop_, top - screen.y);
-        dirtyBottom_ = (std::max)(dirtyBottom_, bottom - screen.y);
-    }
+    dirty_.Add(top - screen.y, bottom - screen.y);
     return kRespOkNoData;
 }
 
@@ -815,13 +809,7 @@ std::uint32_t VirtioGpu::Execute3dControl(Command& command)
         if (right <= left || bottom <= top) return kRespOkNoData;
         Readback(left, top, right - left, bottom - top);
         const std::lock_guard lock(displayMutex_);
-        if (dirtyBottom_ <= dirtyTop_) {
-            dirtyTop_ = top - screen.y;
-            dirtyBottom_ = bottom - screen.y;
-        } else {
-            dirtyTop_ = (std::min)(dirtyTop_, top - screen.y);
-            dirtyBottom_ = (std::max)(dirtyBottom_, bottom - screen.y);
-        }
+        dirty_.Add(top - screen.y, bottom - screen.y);
         return kRespOkNoData;
     }
 
@@ -919,10 +907,8 @@ void VirtioGpu::Cursor3d(const Command& command)
 
 // --- UI side -------------------------------------------------------------------------------------
 
-bool VirtioGpu::CopyScanout(ScanoutCopy& copy, std::uint32_t& top, std::uint32_t& bottom)
+bool VirtioGpu::CopyScanout(ScanoutCopy& copy, DirtyRows& rows)
 {
-    top = 0;
-    bottom = 0;
     const std::lock_guard lock(displayMutex_);
     if (!scanoutActive_ || !scanout_) return false;
     const auto& rect = scanoutRect_;
@@ -935,20 +921,20 @@ bool VirtioGpu::CopyScanout(ScanoutCopy& copy, std::uint32_t& top, std::uint32_t
     }
     if (fullCopy_) {
         fullCopy_ = false;
-        dirtyTop_ = 0;
-        dirtyBottom_ = rect.height;
+        dirty_.Clear();
+        dirty_.Add(0, rect.height);
     }
-    if (dirtyBottom_ <= dirtyTop_) return true;
+    dirty_.Clip(rect.height);
     const auto sourceStride = static_cast<std::size_t>(scanout_->width) * 4;
     const auto rowBytes = static_cast<std::size_t>(rect.width) * 4;
     const auto* source = scanout_->pixels.data() + rect.y * sourceStride + rect.x * 4ull;
-    for (auto row = dirtyTop_; row < dirtyBottom_; ++row) {
-        std::memcpy(copy.pixels.data() + row * rowBytes, source + row * sourceStride, rowBytes);
+    for (const auto& band : dirty_.Bands()) {
+        for (auto row = band.top; row < band.bottom; ++row) {
+            std::memcpy(copy.pixels.data() + row * rowBytes, source + row * sourceStride, rowBytes);
+        }
     }
-    top = dirtyTop_;
-    bottom = dirtyBottom_;
-    dirtyTop_ = 0;
-    dirtyBottom_ = 0;
+    rows.Add(dirty_);
+    dirty_.Clear();
     return true;
 }
 

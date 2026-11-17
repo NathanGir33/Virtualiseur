@@ -509,9 +509,9 @@ void Vm::MouseMotion(int dx, int dy, int wheel, std::uint8_t buttons)
     ps2_->MouseMotion(dx, dy, wheel, buttons);
 }
 
-bool Vm::CopyGpuScanout(ScanoutCopy& copy, std::uint32_t& top, std::uint32_t& bottom)
+bool Vm::CopyGpuScanout(ScanoutCopy& copy, DirtyRows& rows)
 {
-    return virtioGpu_ != nullptr && virtioGpu_->CopyScanout(copy, top, bottom);
+    return virtioGpu_ != nullptr && virtioGpu_->CopyScanout(copy, rows);
 }
 
 bool Vm::GpuCursorSnapshot(GpuCursor& cursor)
