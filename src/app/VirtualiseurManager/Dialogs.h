@@ -14,6 +14,7 @@ enum SettingsPage : int {
     kPageStorage,
     kPageAudio,
     kPageNetwork,
+    kPageShares,
     kPageInstall,
     kPageCount,
 };

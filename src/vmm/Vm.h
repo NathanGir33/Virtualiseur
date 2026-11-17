@@ -46,12 +46,22 @@ class VirtioNet;
 class VgaRegisters;
 class PostPort;
 class VirtioSound;
+class Virtio9p;
 
 enum class DiskBus { Virtio, Ide };
 // Network card attachment, as in VirtualBox.
 enum class NetworkMode { None, Nat, Bridged, Internal, HostOnly, Disconnected };
 enum class BootDevice { Auto, Cdrom, Disk, Kernel };
 enum class DisplayMode { Graphics, Text, None };
+
+inline constexpr std::size_t kMaxShares = 3;
+
+// Host folder shared with the guest over virtio-9p, mounted there by its tag.
+struct SharedFolder {
+    std::string tag;
+    std::filesystem::path path;
+    bool readOnly = false;
+};
 
 struct VmConfig {
     std::string name = "VM";
@@ -86,6 +96,7 @@ struct VmConfig {
     bool rtcLocalTime = false;     // Hardware clock in local time (Windows) instead of UTC.
     bool audio = true;             // virtio-sound card played on the default Windows output.
     bool microphone = false;       // Host microphone recorded by the guest (otherwise: silence).
+    std::vector<SharedFolder> shares; // Up to kMaxShares, one virtio-9p card each.
     bool hyperv = true;            // Hyper-V enlightenments (reference TSC page, synthetic timers).
     bool gpuShare = true;          // virgl screen shown from a shared Direct3D texture (no readback).
 };
@@ -244,6 +255,7 @@ private:
     VirtioGpu* virtioGpu_ = nullptr;
     VirtioTablet* tablet_ = nullptr;
     VirtioSound* sound_ = nullptr;
+    std::vector<Virtio9p*> shares_;
     std::unique_ptr<GuestAgent> agent_;
     std::unique_ptr<QemuGuestAgent> qemuAgent_;
     DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS powerSubscription_{}; // Host suspend/resume.

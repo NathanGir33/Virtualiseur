@@ -526,6 +526,15 @@ std::vector<DetailCard> BuildCards(const VmEntry& vm)
         network.push_back({L"Redirections", rules});
     }
     cards.push_back({ui::glyph::kNetwork, L"Réseau", kPageNetwork, network});
+    std::vector<DetailRow> shares;
+    for (const auto& share : c.shares) {
+        if (share.path.empty()) continue;
+        const bool exists = PathExists(share.path);
+        shares.push_back({share.tag, share.path.wstring() + (share.readOnly ? L" (lecture seule)" : L"") + (exists ? L"" : L" (introuvable)"),
+                          exists ? CLR_INVALID : color::kRed});
+    }
+    if (shares.empty()) shares.push_back({L"Dossiers", L"Aucun", color::kSecondary});
+    cards.push_back({ui::glyph::kFolder, L"Dossiers partagés", kPageShares, shares});
     if (c.fullscreen) cards[2].rows.push_back({L"Démarrage", L"Plein écran"});
     if (!c.iso.empty()) {
         cards.push_back({ui::glyph::kInstall, L"Installation", kPageInstall,

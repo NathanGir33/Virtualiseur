@@ -5,6 +5,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <array>
@@ -53,6 +54,14 @@ enum ControlId : int {
     IdPreseed,
     IdBrowsePreseed,
     IdGuestTools,
+    IdShareTag,
+    IdShareTagLast = IdShareTag + kMaxShares - 1,
+    IdSharePath,
+    IdSharePathLast = IdSharePath + kMaxShares - 1,
+    IdShareBrowse,
+    IdShareBrowseLast = IdShareBrowse + kMaxShares - 1,
+    IdShareReadOnly,
+    IdShareReadOnlyLast = IdShareReadOnly + kMaxShares - 1,
     IdStartNow,
     IdNetNameLabel,
     IdBridge,
@@ -108,6 +117,63 @@ std::wstring BrowseFile(HWND owner, const wchar_t* filter, const wchar_t* title,
                    (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
     const BOOL selected = save ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog);
     return selected ? std::wstring(path.data()) : std::wstring();
+}
+
+std::wstring BrowseFolder(HWND owner, const wchar_t* title, const std::wstring& initial)
+{
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    std::wstring result;
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        dialog->SetTitle(title);
+        IShellItem* folder = nullptr;
+        if (!initial.empty() &&
+            SUCCEEDED(SHCreateItemFromParsingName(initial.c_str(), nullptr, IID_PPV_ARGS(&folder)))) {
+            dialog->SetFolder(folder);
+            folder->Release();
+        }
+        IShellItem* chosen = nullptr;
+        if (SUCCEEDED(dialog->Show(owner)) && SUCCEEDED(dialog->GetResult(&chosen))) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(chosen->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                result = path;
+                CoTaskMemFree(path);
+            }
+            chosen->Release();
+        }
+        dialog->Release();
+    }
+    if (SUCCEEDED(apartment)) CoUninitialize();
+    return result;
+}
+
+// Mount tag of a shared folder: what the guest types after "mount -t 9p".
+bool ValidTag(const std::wstring& tag, std::wstring& error)
+{
+    const bool ok = !tag.empty() && tag.size() <= 31 && std::all_of(tag.begin(), tag.end(), [](wchar_t c) {
+        return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || c == L'_' ||
+               c == L'-' || c == L'.';
+    });
+    if (!ok) error = L"Nom de partage : 1 à 31 caractères parmi lettres sans accent, chiffres, . _ et -.";
+    return ok;
+}
+
+// A tag from the folder name ("Mes Documents" -> "mes-documents").
+std::wstring SuggestTag(const std::wstring& folder, int index)
+{
+    std::wstring tag;
+    for (const wchar_t c : fs::path(folder).filename().wstring()) {
+        if (tag.size() == 31) break;
+        if ((c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'_' || c == L'.') tag.push_back(c);
+        else if (c >= L'A' && c <= L'Z') tag.push_back(static_cast<wchar_t>(c - L'A' + L'a'));
+        else if (!tag.empty() && tag.back() != L'-') tag.push_back(L'-');
+    }
+    while (!tag.empty() && (tag.back() == L'-' || tag.back() == L'.')) tag.pop_back();
+    if (tag.empty()) tag = index == 0 ? L"partage" : L"partage" + std::to_wstring(index + 1);
+    return tag;
 }
 
 bool ValidName(const std::wstring& name, std::wstring& error)
@@ -755,6 +821,7 @@ constexpr std::array<Category, kPageCount> kCategories{{
     {ui::glyph::kDisk, L"Stockage"},
     {ui::glyph::kAudio, L"Audio"},
     {ui::glyph::kNetwork, L"Réseau"},
+    {ui::glyph::kFolder, L"Dossiers partagés"},
     {ui::glyph::kInstall, L"Installation"},
 }};
 
@@ -941,6 +1008,29 @@ private:
         AddButton(kPageNetwork, IdForwardAdd, L"Ajouter", kLeft + 334, 418, 100);
         forwards_ = c.forwards;
         RefreshForwards();
+
+        // Dossiers partagés.
+        AddLabel(kPageShares, L"Nom (tag)", kLeft, 70, 120);
+        AddLabel(kPageShares, L"Dossier Windows", kLeft + 130, 70, 300);
+        for (int index = 0; index < static_cast<int>(kMaxShares); ++index) {
+            const auto& share = c.shares[static_cast<std::size_t>(index)];
+            const int y = 100 + index * 72;
+            AddEdit(kPageShares, IdShareTag + index, share.tag, kLeft, y, 120);
+            SendMessageW(Item(IdShareTag + index), EM_SETCUEBANNER, TRUE,
+                         reinterpret_cast<LPARAM>(index == 0 ? L"partage" : L"tag"));
+            AddEdit(kPageShares, IdSharePath + index, share.path.wstring(), kLeft + 130, y, kRight - kLeft - 130 - 108);
+            SendMessageW(Item(IdSharePath + index), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Aucun dossier"));
+            AddButton(kPageShares, IdShareBrowse + index, L"Parcourir…", kRight - 100, y - 2, 100);
+            AddCheck(kPageShares, IdShareReadOnly + index, L"Lecture seule", kLeft + 130, y + 32, 200);
+            SetChecked(IdShareReadOnly + index, share.readOnly);
+        }
+        AddStatic(kPageShares,
+                  L"Chaque dossier apparaît dans la machine comme un système de fichiers 9p, monté par son nom. "
+                  L"Par exemple, dans un terminal du système invité : sudo mkdir -p /mnt/partage puis "
+                  L"sudo mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 partage /mnt/partage. "
+                  L"La machine ne peut pas sortir du dossier choisi ; liens symboliques et verrous de fichiers ne sont "
+                  L"pas pris en charge. Effacer le chemin retire le partage.",
+                  kLeft, 330, kRight - kLeft, 100, ui::Font().caption, color::kSecondary);
 
         // Installation.
         AddLabel(kPageInstall, L"Installateur Debian :", kLeft, 70);
@@ -1167,6 +1257,17 @@ private:
             SetText(IdIso, L"");
             UpdateIsoInfo();
             break;
+        case IdShareBrowse:
+        case IdShareBrowse + 1:
+        case IdShareBrowse + 2: {
+            const int index = id - IdShareBrowse;
+            const auto path = BrowseFolder(window_, L"Dossier à partager avec la machine", TextOf(IdSharePath + index));
+            if (!path.empty()) {
+                SetText(IdSharePath + index, path);
+                if (TextOf(IdShareTag + index).empty()) SetText(IdShareTag + index, SuggestTag(path, index));
+            }
+            break;
+        }
         case IdBrowsePreseed: {
             const auto path = BrowseFile(window_, L"Preseed Debian (*.cfg)\0*.cfg\0Tous les fichiers\0*.*\0\0",
                                          L"Fichier preseed", false, nullptr, TextOf(IdPreseed));
@@ -1357,6 +1458,29 @@ private:
         if (!c.preseed.empty() && !PathExists(c.preseed)) {
             Fail(kPageInstall, IdPreseed, L"Le fichier preseed indiqué est introuvable.");
             return false;
+        }
+        for (int index = 0; index < static_cast<int>(kMaxShares); ++index) {
+            auto& share = c.shares[static_cast<std::size_t>(index)];
+            share.path = TextOf(IdSharePath + index);
+            share.tag = TextOf(IdShareTag + index);
+            share.readOnly = Checked(IdShareReadOnly + index);
+            if (share.path.empty()) continue;
+            if (!PathExists(share.path) || !fs::is_directory(share.path)) {
+                Fail(kPageShares, IdSharePath + index, L"Ce dossier partagé est introuvable.");
+                return false;
+            }
+            std::wstring tagError;
+            if (!ValidTag(share.tag, tagError)) {
+                Fail(kPageShares, IdShareTag + index, tagError);
+                return false;
+            }
+            for (int other = 0; other < index; ++other) {
+                const auto& previous = c.shares[static_cast<std::size_t>(other)];
+                if (!previous.path.empty() && previous.tag == share.tag) {
+                    Fail(kPageShares, IdShareTag + index, L"Deux dossiers partagés ne peuvent pas porter le même nom.");
+                    return false;
+                }
+            }
         }
         c.guestTools = Checked(IdGuestTools);
         if (c.os.empty()) c.os = DetectOsFromIso(c.iso);

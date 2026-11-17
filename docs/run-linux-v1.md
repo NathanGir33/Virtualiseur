@@ -83,6 +83,23 @@ Ces fonctions passent par l'agent `spice-vdagent` du système invité.
 
 `vmm.log` affiche « Agent invité (spice-vdagent) connecté » quand l'agent est actif.
 
+## Dossiers partagés
+
+Dans *Configuration → Dossiers partagés*, choisis jusqu'à trois dossiers Windows, chacun avec un nom (tag) et, si besoin, en lecture seule. Dans la machine, monte-les par leur nom :
+
+```sh
+sudo mkdir -p /mnt/partage
+sudo mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 partage /mnt/partage
+```
+
+Pour un montage automatique au démarrage, ajoute à `/etc/fstab` :
+
+```
+partage  /mnt/partage  9p  trans=virtio,version=9p2000.L,msize=524288,nofail  0  0
+```
+
+La machine ne peut pas sortir du dossier choisi (même par une jonction NTFS). Les fichiers appartiennent à l'utilisateur qui les regarde ; `chmod` ne règle que la lecture seule. Liens symboliques, attributs étendus et verrous (`flock`) ne sont pas pris en charge ; les noms interdits par Windows (`a:b`, `NUL`...) sont refusés.
+
 ## 7. Diagnostic
 
 Chaque VM écrit dans son dossier :

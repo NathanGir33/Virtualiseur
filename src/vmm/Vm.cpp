@@ -11,6 +11,7 @@
 #include "devices/VirtioBlk.h"
 #include "devices/VirtioNet.h"
 #include "devices/VirtioSound.h"
+#include "devices/Virtio9p.h"
 #include "firmware/AcpiTables.h"
 #include "net/BridgeNetworkBackend.h"
 #include "net/InternalNetworkBackend.h"
@@ -67,6 +68,7 @@ constexpr std::uint8_t kVirtioTabletSlot = 6;
 constexpr std::uint8_t kVirtioSerialSlot = 7;
 constexpr std::uint8_t kVirtioSoundSlot = 8;
 constexpr std::uint8_t kQemuAgentSlot = 9;
+constexpr std::uint8_t kShareSlot = 10;     // 10, 11, 12: one virtio-9p card per shared folder.
 constexpr std::uint32_t kVirtioNetGsi = 11;
 constexpr std::uint32_t kVirtioBlkGsi = 10;
 constexpr std::uint32_t kVirtioGpuGsi = 16;
@@ -74,6 +76,7 @@ constexpr std::uint32_t kVirtioTabletGsi = 17;
 constexpr std::uint32_t kVirtioSerialGsi = 18;
 constexpr std::uint32_t kVirtioSoundGsi = 19;
 constexpr std::uint32_t kQemuAgentGsi = 20;
+constexpr std::uint32_t kShareGsi = 21;      // 21, 22, 23.
 constexpr std::uint32_t kVirtioMmioBase = 0xFE000000;
 
 std::string PathUtf8(const std::filesystem::path& path)
@@ -369,6 +372,28 @@ void Vm::BuildDevices()
         }
     }
 
+    std::vector<PciInterruptRoute> shareRoutes;
+    for (std::size_t index = 0; index < config_.shares.size(); ++index) {
+        const auto& share = config_.shares[index];
+        if (index >= kMaxShares) {
+            VMM_WARN("Dossier partagé « %s » ignoré : %zu au plus.", share.tag.c_str(), kMaxShares);
+            continue;
+        }
+        const auto slot = static_cast<std::uint8_t>(kShareSlot + index);
+        const auto gsi = static_cast<std::uint32_t>(kShareGsi + index);
+        try {
+            auto device = std::make_unique<Virtio9p>(*memory_, placement(slot, gsi), share.tag, share.path, share.readOnly);
+            VMM_INFO("Dossier partagé « %s »%s : %s. Dans l'invité : mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 %s <dossier>",
+                     share.tag.c_str(), share.readOnly ? " (lecture seule)" : "", PathUtf8(share.path).c_str(), share.tag.c_str());
+            shares_.push_back(device.get());
+            pciBus_->Add(slot, 0, device.get());
+            pciFunctions_.push_back(std::move(device));
+            shareRoutes.push_back({slot, static_cast<std::uint8_t>(gsi)});
+        } catch (const std::exception& error) {
+            VMM_WARN("Dossier partagé « %s » (%s) indisponible : %s.", share.tag.c_str(), PathUtf8(share.path).c_str(), error.what());
+        }
+    }
+
     AcpiConfig acpi;
     acpi.cpuCount = config_.cpus;
     acpi.pciMmioStart = static_cast<std::uint32_t>(memory_->LowRamEnd());
@@ -379,6 +404,7 @@ void Vm::BuildDevices()
                       {kVirtioSerialSlot, static_cast<std::uint8_t>(kVirtioSerialGsi)},
                       {kVirtioSoundSlot, static_cast<std::uint8_t>(kVirtioSoundGsi)},
                       {kQemuAgentSlot, static_cast<std::uint8_t>(kQemuAgentGsi)}};
+    acpi.pciRoutes.insert(acpi.pciRoutes.end(), shareRoutes.begin(), shareRoutes.end());
     const auto rsdp = BuildAcpiTables(*memory_, acpi);
     (void)rsdp;
 }
@@ -779,6 +805,7 @@ std::string Vm::Statistics() const
         if (const auto offset = qemuAgent_->LastOffsetMs()) text << " ecart_horloge_ms=" << *offset;
         else text << " agent_qemu=" << (qemuAgent_->Connected() ? "connecte" : "absent");
     }
+    for (const auto* share : shares_) text << " 9p_" << share->Tag() << "=" << share->Requests();
     return text.str();
 }
 

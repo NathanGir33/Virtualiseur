@@ -139,6 +139,13 @@ std::optional<VmEntry> LoadEntry(const fs::path& directory)
         c.gpu3d = gpu == L"virgl";
         c.audio = IniFlag(file, L"audio", true);
         c.microphone = IniFlag(file, L"microphone", false);
+        for (std::size_t index = 0; index < kMaxShares; ++index) {
+            const auto prefix = L"share" + std::to_wstring(index + 1) + L"_";
+            auto& share = c.shares[index];
+            share.tag = IniRead(file, (prefix + L"tag").c_str());
+            share.path = IniRead(file, (prefix + L"path").c_str());
+            share.readOnly = IniFlag(file, (prefix + L"ro").c_str(), false);
+        }
         c.graphicalInstaller = IniRead(file, L"installer", L"text") == L"gtk";
         c.guestTools = IniFlag(file, L"guest_tools", true);
         c.preseed = IniRead(file, L"preseed");
@@ -297,6 +304,13 @@ void SaveConfig(const VmEntry& entry)
     put(L"gpu", !c.virtioGpu ? L"none" : c.gpu3d ? L"virgl" : L"virtio");
     put(L"audio", c.audio ? L"on" : L"off");
     put(L"microphone", c.microphone ? L"on" : L"off");
+    for (std::size_t index = 0; index < kMaxShares; ++index) {
+        const auto prefix = L"share" + std::to_wstring(index + 1) + L"_";
+        const auto& share = c.shares[index];
+        put((prefix + L"tag").c_str(), share.path.empty() ? L"" : share.tag);
+        put((prefix + L"path").c_str(), share.path.wstring());
+        put((prefix + L"ro").c_str(), share.readOnly ? L"on" : L"off");
+    }
     put(L"installer", c.graphicalInstaller ? L"gtk" : L"text");
     put(L"guest_tools", c.guestTools ? L"on" : L"off");
     put(L"preseed", c.preseed.wstring());
@@ -479,6 +493,12 @@ std::optional<std::string> SendCommand(const std::wstring& vmName, const char* c
 bool LaunchVm(VmEntry& vm, std::wstring& message)
 {
     const auto& c = vm.config;
+    for (const auto& share : c.shares) {
+        if (!share.path.empty() && !PathExists(share.path)) {
+            message = L"Le dossier partagé « " + share.tag + L" » est introuvable : " + share.path.wstring();
+            return false;
+        }
+    }
     if (!c.iso.empty() && !PathExists(c.iso)) {
         message = L"L'image ISO est introuvable : " + c.iso.wstring();
         return false;
@@ -529,6 +549,10 @@ bool LaunchVm(VmEntry& vm, std::wstring& message)
             }
         }
         if (c.fullscreen) arguments += L" --fullscreen";
+        for (const auto& share : c.shares) {
+            if (share.path.empty()) continue;
+            arguments += L" --share " + QuoteArgument(share.tag + L"=" + share.path.wstring() + (share.readOnly ? L",ro" : L""));
+        }
         if (!c.iso.empty()) arguments += L" --iso " + QuoteArgument(c.iso.wstring());
         if (c.boot == BootOrder::Cdrom) arguments += L" --boot cdrom";
         else if (c.boot == BootOrder::Disk) arguments += L" --boot disk";

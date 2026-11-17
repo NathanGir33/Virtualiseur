@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <array>
 #include <vector>
 
 namespace manager {
@@ -39,6 +40,14 @@ struct HostAdapterInfo {
     bool virtualAdapter = false;
 };
 
+// Host folder shared with the guest (virtio-9p), mounted there by its tag.
+struct ShareConfig {
+    std::wstring tag;
+    fs::path path;
+    bool readOnly = false;
+};
+inline constexpr std::size_t kMaxShares = 3;
+
 struct VmConfig {
     std::wstring name;
     unsigned memoryMiB = 2048;
@@ -58,6 +67,7 @@ struct VmConfig {
     bool gpu3d = true;
     bool audio = true;
     bool microphone = false; // The guest may record the Windows microphone.
+    std::array<ShareConfig, kMaxShares> shares; // Empty path: unused slot.
     bool graphicalInstaller = false;
     bool guestTools = true;
     fs::path preseed;

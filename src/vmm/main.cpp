@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <cctype>
 #include <thread>
 #include <vector>
 
@@ -209,6 +210,25 @@ Options ParseOptions(const std::vector<std::string>& args)
             if (value == "on") options.vm.audio = true;
             else if (value == "off") options.vm.audio = false;
             else throw std::invalid_argument("--audio attend on ou off.");
+        } else if (option == "--share") {
+            const auto& value = next();
+            const auto equals = value.find('=');
+            if (equals == std::string::npos || equals == 0) throw std::invalid_argument("--share attend <tag>=<dossier>[,ro].");
+            SharedFolder share;
+            share.tag = value.substr(0, equals);
+            auto path = value.substr(equals + 1);
+            if (path.size() > 3 && path.compare(path.size() - 3, 3, ",ro") == 0) {
+                share.readOnly = true;
+                path.resize(path.size() - 3);
+            }
+            for (const char c : share.tag) {
+                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-' && c != '.') {
+                    throw std::invalid_argument("--share : le tag ne peut contenir que lettres, chiffres, . _ et -.");
+                }
+            }
+            if (share.tag.size() > 31) throw std::invalid_argument("--share : tag de 31 caractères au plus.");
+            share.path = Utf8Path(path);
+            options.vm.shares.push_back(std::move(share));
         } else if (option == "--mic") {
             const auto& value = next();
             if (value == "on") options.vm.microphone = true;

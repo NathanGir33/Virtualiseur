@@ -92,6 +92,8 @@
     <ClCompile Include="devices\VirtioSound.cpp" />
     <ClCompile Include="audio\WasapiOutput.cpp" />
     <ClCompile Include="audio\WasapiInput.cpp" />
+    <ClCompile Include="devices\Virtio9p.cpp" />
+    <ClCompile Include="share\NinePServer.cpp" />
     <ClCompile Include="agent\GuestAgent.cpp" />
     <ClCompile Include="agent\QemuGuestAgent.cpp" />
     <ClCompile Include="ui\ClipboardBridge.cpp" />
