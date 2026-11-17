@@ -49,6 +49,7 @@
     <ClCompile Include="VirtualDisk.cpp" />
     <ClCompile Include="DiskLayer.cpp" />
     <ClCompile Include="DiskSnapshots.cpp" />
+    <ClCompile Include="MachineArchive.cpp" />
     <ClCompile Include="Iso9660Image.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -56,6 +57,7 @@
     <ClInclude Include="VirtualDisk.h" />
     <ClInclude Include="DiskLayer.h" />
     <ClInclude Include="DiskSnapshots.h" />
+    <ClInclude Include="MachineArchive.h" />
     <ClInclude Include="Iso9660Image.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

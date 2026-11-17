@@ -108,6 +108,8 @@ Bouton **Instantanés** du gestionnaire : *Prendre* fige le disque, même machin
 
 **Cloner** (même fenêtre, sur l'état actuel ou un instantané) : un *clone complet* est une copie indépendante du disque (seuls les blocs utilisés sont écrits, sans l'historique) ; un *clone lié* est créé tout de suite et ne stocke que ses propres modifications, mais il lit le disque de la source : tant qu'il existe, on ne peut supprimer ni la source ni l'instantané dont il part, ni renommer l'une ou l'autre. Depuis l'état actuel, un clone lié commence par un instantané « Clone <nom> » de la source (gelé si elle tourne). Source et clones liés peuvent tourner en même temps. Chaque clone reçoit une nouvelle adresse MAC et un nouvel identifiant. Le gestionnaire accepte `--library <dossier>` pour ouvrir une autre bibliothèque.
 
+**Exporter / importer** : *Machine → Exporter…* enregistre la machine éteinte dans un fichier `.vrtx` (configuration + disque compressé, sans l'historique des instantanés) ; le bouton *Exporter…* de la fenêtre Instantanés exporte l'instantané choisi, même machine allumée. *Fichier → Importer une machine…* lit le fichier, propose un nom libre, puis recrée la machine avec un disque sparse, une nouvelle adresse MAC et un nouvel identifiant : elle peut tourner à côté de l'originale. Les chemins de l'autre ordinateur (ISO, preseed, dossiers partagés) qui n'existent pas ici sont retirés. Un fichier abîmé (CRC, troncature) est refusé et rien n'est créé ; *Annuler* pendant l'export ou l'import ne laisse aucun fichier.
+
 ## 7. Diagnostic
 
 Chaque VM écrit dans son dossier :

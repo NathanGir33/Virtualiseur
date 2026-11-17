@@ -148,6 +148,32 @@ struct CloneRequest {
 bool CloneVm(const VmEntry& source, bool sourceStopped, const CloneRequest& request, const fs::path& library,
              const std::vector<VmEntry>& vms, const std::function<bool(std::uint64_t, std::uint64_t)>& progress,
              std::wstring& message);
+// Export to a single .vrtx file (MachineArchive): the settings and one
+// flattened disk state, without snapshot history. `snapshot` 0 exports the
+// current state, which needs the machine off. Identity (uuid, linked-clone
+// source) is not exported; ISO, preseed and shared folders stay host paths.
+// `progress` returns false to cancel: nothing is left behind (`cancelled` set).
+using Progress = std::function<bool(std::uint64_t, std::uint64_t)>;
+bool ExportVm(const VmEntry& vm, bool stopped, std::uint32_t snapshot, const fs::path& target, const Progress& progress,
+              bool& cancelled, std::wstring& message);
+
+// What a .vrtx file holds, read before importing it (header and settings only).
+struct ArchivePreview {
+    std::wstring name;
+    std::wstring os;
+    unsigned memoryMiB = 0;
+    unsigned cpus = 0;
+    std::uint64_t diskBytes = 0;
+};
+bool PreviewArchive(const fs::path& archive, ArchivePreview& preview, std::wstring& message);
+// Checks a new machine name (valid characters, no machine or folder with it).
+bool CheckNewVmName(const std::wstring& name, const fs::path& library, const std::vector<VmEntry>& vms, std::wstring& message);
+// Imports a .vrtx file as machine `name`: new sparse disk.img, new MAC address
+// and id; host paths that do not exist here (ISO, preseed, shares) are cleared.
+// On error or cancellation the machine folder is removed entirely.
+bool ImportVm(const fs::path& archive, const std::wstring& name, const fs::path& library, const std::vector<VmEntry>& vms,
+              const Progress& progress, bool& cancelled, std::wstring& message);
+
 // Starts the VM process; on failure returns false with a message.
 bool LaunchVm(VmEntry& vm, std::wstring& message);
 

@@ -5,6 +5,7 @@
 
 #include "DiskLayer.h"
 #include "DiskSnapshots.h"
+#include "MachineArchive.h"
 #include "VirtualDisk.h"
 
 #include <winioctl.h>
@@ -689,17 +690,8 @@ bool CloneVm(const VmEntry& source, bool sourceStopped, const CloneRequest& requ
     using virtualiseur::whp::LayerFile;
     using virtualiseur::whp::SnapshotStore;
     const auto& name = request.name;
-    if (name.empty() || name.size() > 80 || name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos || name.back() == L'.') {
-        message = L"Nom invalide : évite les caractères \\ / : * ? \" < > | et le point final.";
-        return false;
-    }
+    if (!CheckNewVmName(name, library, vms, message)) return false;
     const auto directory = library / name;
-    if (PathExists(directory) || std::any_of(vms.begin(), vms.end(), [&](const VmEntry& vm) {
-            return _wcsicmp(vm.config.name.c_str(), name.c_str()) == 0;
-        })) {
-        message = L"Une machine porte déjà ce nom.";
-        return false;
-    }
     try {
         const auto sourceFolder = source.config.disk.parent_path();
         SnapshotStore store(source.config.disk);
@@ -775,6 +767,193 @@ bool CloneVm(const VmEntry& source, bool sourceStopped, const CloneRequest& requ
         message = L"Clonage impossible : " + FromUtf8(error.what());
         return false;
     }
+}
+
+bool CheckNewVmName(const std::wstring& name, const fs::path& library, const std::vector<VmEntry>& vms, std::wstring& message)
+{
+    if (name.empty() || name.size() > 80 || name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos || name.back() == L'.') {
+        message = L"Nom invalide : évite les caractères \\ / : * ? \" < > | et le point final.";
+        return false;
+    }
+    if (PathExists(library / name) || std::any_of(vms.begin(), vms.end(), [&](const VmEntry& vm) {
+            return _wcsicmp(vm.config.name.c_str(), name.c_str()) == 0;
+        })) {
+        message = L"Une machine porte déjà ce nom.";
+        return false;
+    }
+    return true;
+}
+
+namespace {
+
+// The settings of an archive: "key=value" lines of the [vm] section, UTF-8.
+std::vector<std::pair<std::wstring, std::wstring>> ParseArchiveConfig(const std::string& text)
+{
+    std::vector<std::pair<std::wstring, std::wstring>> result;
+    std::size_t start = 0;
+    while (start < text.size()) {
+        auto end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        auto line = text.substr(start, end - start);
+        start = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const auto equal = line.find('=');
+        if (equal == std::string::npos || equal == 0) continue;
+        const auto key = line.substr(0, equal);
+        // Only plain keys: nothing that could address another section or file.
+        if (key.size() > 32 || !std::all_of(key.begin(), key.end(), [](char c) {
+                return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+            })) {
+            continue;
+        }
+        result.emplace_back(FromUtf8(key), FromUtf8(line.substr(equal + 1)));
+    }
+    return result;
+}
+
+std::wstring ArchiveValue(const std::vector<std::pair<std::wstring, std::wstring>>& config, const wchar_t* key)
+{
+    for (const auto& [name, value] : config) {
+        if (name == key) return value;
+    }
+    return {};
+}
+
+} // namespace
+
+bool ExportVm(const VmEntry& vm, bool stopped, std::uint32_t snapshot, const fs::path& target, const Progress& progress,
+              bool& cancelled, std::wstring& message)
+{
+    using virtualiseur::whp::SnapshotStore;
+    cancelled = false;
+    std::error_code ignored;
+    const auto scratch = fs::temp_directory_path(ignored) / (L"Virtualiseur-export-" + NewUuid());
+    try {
+        // The disk state: a snapshot's frozen layer, or the current state (machine off).
+        const SnapshotStore store(vm.config.disk);
+        fs::path state;
+        if (snapshot != 0) {
+            const auto* found = store.Find(snapshot);
+            if (found == nullptr) throw std::runtime_error("Instantané introuvable.");
+            state = vm.config.disk.parent_path() / found->layer;
+        } else {
+            if (!stopped) {
+                message = L"Éteins la machine, ou exporte un de ses instantanés : son état actuel change pendant qu'elle tourne.";
+                return false;
+            }
+            state = store.CurrentLayer();
+        }
+
+        // The settings, serialized by SaveConfig into a scratch vm.ini then
+        // read back as one [vm] section: no second list of keys to maintain.
+        VmEntry copy;
+        copy.directory = scratch;
+        copy.config = vm.config;
+        copy.config.disk = L"disk.img";
+        copy.config.uuid.clear();
+        copy.config.cloneOf.clear();
+        SaveConfig(copy);
+        std::vector<wchar_t> section(64 * 1024);
+        const DWORD length = GetPrivateProfileSectionW(L"vm", section.data(), static_cast<DWORD>(section.size()),
+                                                       (scratch / L"vm.ini").c_str());
+        fs::remove_all(scratch, ignored);
+        if (length == 0 || length >= section.size() - 2) throw std::runtime_error("Lecture de la configuration impossible.");
+        std::string config = "[vm]\r\n";
+        for (const wchar_t* entry = section.data(); *entry != L'\0'; entry += wcslen(entry) + 1) {
+            config += Utf8(entry) + "\r\n";
+        }
+
+        virtualiseur::whp::ExportMachine(state, config, target, progress);
+        std::error_code error;
+        const auto size = fs::file_size(target, error);
+        message = L"« " + vm.config.name + L" » exportée vers " + target.filename().wstring() +
+                  (error ? L"." : L" (" + FormatBytes(size) + L").");
+        return true;
+    } catch (const virtualiseur::whp::ArchiveCancelled&) {
+        fs::remove_all(scratch, ignored);
+        cancelled = true;
+        message = L"Export annulé : aucun fichier n'a été créé.";
+        return false;
+    } catch (const std::exception& error) {
+        fs::remove_all(scratch, ignored);
+        message = L"Export impossible : " + FromUtf8(error.what());
+        return false;
+    }
+}
+
+bool PreviewArchive(const fs::path& archive, ArchivePreview& preview, std::wstring& message)
+{
+    try {
+        const auto info = virtualiseur::whp::ReadArchiveInfo(archive);
+        const auto config = ParseArchiveConfig(info.config);
+        preview.name = ArchiveValue(config, L"name");
+        if (preview.name.empty()) preview.name = archive.stem().wstring();
+        preview.os = ArchiveValue(config, L"os");
+        preview.memoryMiB = static_cast<unsigned>(std::wcstoul(ArchiveValue(config, L"memory").c_str(), nullptr, 10));
+        preview.cpus = static_cast<unsigned>(std::wcstoul(ArchiveValue(config, L"cpus").c_str(), nullptr, 10));
+        preview.diskBytes = info.virtualSize;
+        return true;
+    } catch (const std::exception& error) {
+        message = FromUtf8(error.what());
+        return false;
+    }
+}
+
+bool ImportVm(const fs::path& archive, const std::wstring& name, const fs::path& library, const std::vector<VmEntry>& vms,
+              const Progress& progress, bool& cancelled, std::wstring& message)
+{
+    cancelled = false;
+    if (!CheckNewVmName(name, library, vms, message)) return false;
+    const auto directory = library / name;
+    bool created = false;
+    try {
+        const auto info = virtualiseur::whp::ReadArchiveInfo(archive);
+        const auto config = ParseArchiveConfig(info.config);
+        if (!fs::create_directories(directory)) throw std::runtime_error("Dossier de la machine impossible à créer.");
+        created = true;
+        // The disk first: every block is checked (CRC) before the machine exists.
+        const auto disk = directory / L"disk.img";
+        virtualiseur::whp::ImportDisk(archive, disk, progress);
+
+        // vm.ini: UTF-16 BOM (Unicode names and paths), then the archive's keys.
+        const auto file = directory / L"vm.ini";
+        HANDLE handle = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) throw std::runtime_error("Création de vm.ini impossible.");
+        const wchar_t bom = 0xFEFF;
+        DWORD written = 0;
+        WriteFile(handle, &bom, sizeof(bom), &written, nullptr);
+        CloseHandle(handle);
+        for (const auto& [key, value] : config) WritePrivateProfileStringW(L"vm", key.c_str(), value.c_str(), file.c_str());
+
+        auto entry = LoadEntry(directory);
+        if (!entry) throw std::runtime_error("Configuration de la machine illisible.");
+        auto& c = entry->config;
+        c.name = name;
+        c.disk = disk;
+        c.diskGiB = static_cast<unsigned>((std::max)(1ull, (info.virtualSize + (1ull << 30) - 1) >> 30));
+        c.mac = UniqueMac(vms); // A new identity: the source machine may run on the same network.
+        c.uuid = NewUuid();
+        c.cloneOf.clear();
+        // Host paths from the exporting computer that do not exist here.
+        if (!c.iso.empty() && !PathExists(c.iso)) c.iso.clear();
+        if (!c.preseed.empty() && !PathExists(c.preseed)) c.preseed.clear();
+        for (auto& share : c.shares) {
+            if (!share.path.empty() && !PathExists(share.path)) share = {};
+        }
+        SaveConfig(*entry);
+        message = L"Machine « " + name + L" » importée.";
+        return true;
+    } catch (const virtualiseur::whp::ArchiveCancelled&) {
+        cancelled = true;
+        message = L"Import annulé : rien n'a été créé.";
+    } catch (const std::exception& error) {
+        message = L"Import impossible : " + FromUtf8(error.what());
+    }
+    if (created) {
+        std::error_code ignored;
+        fs::remove_all(directory, ignored); // Transactional: no half-imported machine.
+    }
+    return false;
 }
 
 std::wstring RandomMac()

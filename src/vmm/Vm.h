@@ -153,6 +153,9 @@ public:
     VmConfig CurrentConfig() const;
     // Guest clock: checks it now through qemu-guest-agent (when the guest runs it).
     void SyncGuestTime(const char* reason);
+    // PNG of the screen at most `maxWidth` wide (manager preview); false
+    // without a graphical screen yet.
+    bool WriteThumbnail(const std::filesystem::path& path, std::uint32_t maxWidth);
     // Live disk snapshot: freezes the guest file systems through
     // qemu-guest-agent (4 s at most), switches the disk to a new layer, thaws.
     // Without the freeze the snapshot is taken anyway, crash-consistent.

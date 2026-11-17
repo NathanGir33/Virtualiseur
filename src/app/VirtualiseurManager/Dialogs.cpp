@@ -93,6 +93,7 @@ enum ControlId : int {
     IdForwardGuest,
     IdForwardAdd,
     IdFullscreen,
+    IdSnapshotExport,
 };
 constexpr int kTrackOffset = 1000;
 constexpr int kSpinOffset = 2000;
@@ -498,6 +499,9 @@ protected:
     virtual void PaintBackground(HDC, const RECT&) {}
     virtual bool DrawItem(const DRAWITEMSTRUCT&) { return false; }
     virtual void Focus() {}
+    // Annuler, Escape or the close box: false keeps the window open.
+    virtual bool CanClose() { return true; }
+    virtual void Timer(UINT_PTR) {}
 
     // --- Building (DIP coordinates) ---
     HWND Add(int page, int id, const wchar_t* className, const std::wstring& text, DWORD style,
@@ -669,6 +673,12 @@ protected:
 
     // The window was asked to close (Escape, close box) during a long operation.
     bool Closing() const noexcept { return done_; }
+    // Ends the modal loop (Run returns `accepted`).
+    void Close(bool accepted) noexcept
+    {
+        accepted_ = accepted;
+        done_ = true;
+    }
 
     HWND window_ = nullptr;
     int page_ = 0;
@@ -778,7 +788,7 @@ private:
                 return 0;
             }
             if (id == IDCANCEL) {
-                done_ = true;
+                if (CanClose()) done_ = true;
                 return 0;
             }
             if (code == EN_CHANGE) {
@@ -794,7 +804,10 @@ private:
         case DM_GETDEFID:
             return MAKELRESULT(IDOK, DC_HASDEFID);
         case WM_CLOSE:
-            done_ = true;
+            if (CanClose()) done_ = true;
+            return 0;
+        case WM_TIMER:
+            Timer(wParam);
             return 0;
         default:
             break;
@@ -1809,6 +1822,226 @@ private:
     CloneRequest& request_;
 };
 
+namespace {
+
+// Modal window for a long operation run on a thread: caption, percentage bar
+// and Annuler. Annuler, Escape or the close box ask the operation to stop;
+// the window closes once the thread has returned (and cleaned up).
+class ProgressDialog final : public Form {
+public:
+    using Work = std::function<bool(const Progress&)>;
+    ProgressDialog(std::wstring caption, Work work) : caption_(std::move(caption)), work_(std::move(work)) {}
+    ~ProgressDialog() override
+    {
+        cancel_ = true;
+        if (worker_.joinable()) worker_.join();
+    }
+    bool Cancelled() const noexcept { return cancel_; }
+
+    static constexpr int kWidth = 480;
+    static constexpr int kHeight = 176;
+
+private:
+    static constexpr int kLeft = 24;
+    static constexpr int kRight = kWidth - 24;
+    static constexpr int kBarTop = 64;
+    static constexpr UINT_PTR kTimer = 1;
+
+    void Build() override
+    {
+        AddStatic(-1, caption_, kLeft, 20, kRight - kLeft, 36, ui::Font().body, color::kText);
+        AddStatic(-1, L"Préparation…", kLeft, kBarTop + 18, kRight - kLeft, 20, ui::Font().caption, color::kSecondary, SS_LEFT,
+                  IdMessage);
+        AddButton(-1, IDCANCEL, L"Annuler", kRight - 100, kHeight - 46, 100, 32);
+    }
+
+    void Focus() override
+    {
+        if (worker_.joinable()) return;
+        SetFocus(Item(IDCANCEL));
+        worker_ = std::thread([this] {
+            ok_ = work_([this](std::uint64_t done, std::uint64_t total) {
+                doneCount_ = done;
+                totalCount_ = total;
+                return !cancel_.load();
+            });
+            finished_ = true;
+        });
+        SetTimer(window_, kTimer, 100, nullptr);
+    }
+
+    void Timer(UINT_PTR) override
+    {
+        if (finished_) {
+            KillTimer(window_, kTimer);
+            worker_.join();
+            Close(ok_);
+            return;
+        }
+        if (cancel_) return;
+        const std::uint64_t total = totalCount_;
+        const auto permille = total == 0 ? 0u : static_cast<unsigned>((std::min)(doneCount_.load(), total) * 1000 / total);
+        if (permille != permille_) {
+            permille_ = permille;
+            SetMessage(std::to_wstring(permille / 10) + L" %", false);
+            RECT bar{Scale(kLeft), Scale(kBarTop), Scale(kRight), Scale(kBarTop + 8)};
+            InvalidateRect(window_, &bar, FALSE);
+        }
+    }
+
+    bool CanClose() override
+    {
+        if (finished_) return true;
+        cancel_ = true;
+        EnableWindow(Item(IDCANCEL), FALSE);
+        SetMessage(L"Annulation…", false);
+        return false; // Closed by Timer once the thread has cleaned up.
+    }
+
+    void PaintBackground(HDC dc, const RECT&) override
+    {
+        RECT track{Scale(kLeft), Scale(kBarTop), Scale(kRight), Scale(kBarTop + 8)};
+        ui::RoundedRect(dc, track, Scale(4), color::kBorder);
+        if (permille_ > 0) {
+            RECT fill = track;
+            fill.right = fill.left + static_cast<int>(static_cast<long long>(track.right - track.left) * permille_ / 1000);
+            if (fill.right - fill.left >= Scale(8)) ui::RoundedRect(dc, fill, Scale(4), color::kAccent);
+        }
+    }
+
+    bool Commit() override { return false; } // No OK button: Enter does nothing.
+
+    std::wstring caption_;
+    Work work_;
+    std::thread worker_;
+    std::atomic_bool cancel_ = false;
+    std::atomic_bool finished_ = false;
+    std::atomic<std::uint64_t> doneCount_ = 0;
+    std::atomic<std::uint64_t> totalCount_ = 0;
+    bool ok_ = false; // Written by the thread before `finished_`.
+    unsigned permille_ = 0;
+};
+
+// Import: what the file holds, and the new machine's name.
+class ImportDialog final : public Form {
+public:
+    ImportDialog(std::wstring summary, std::wstring suggestedName, const fs::path& library, const std::vector<VmEntry>& vms,
+                 std::wstring& name)
+        : summary_(std::move(summary)), suggestedName_(std::move(suggestedName)), library_(library), vms_(vms), name_(name) {}
+
+    static constexpr int kWidth = 560;
+    static constexpr int kHeight = 300;
+
+private:
+    static constexpr int kLeft = 24;
+    static constexpr int kField = 150;
+    static constexpr int kRight = kWidth - 24;
+
+    void Build() override
+    {
+        AddStatic(-1, summary_, kLeft, 20, kRight - kLeft, 40, ui::Font().caption, color::kSecondary);
+        AddLabel(-1, L"Nom :", kLeft, 76, 120);
+        AddEdit(-1, IdCloneName, suggestedName_, kField, 74, kRight - kField);
+        AddStatic(-1,
+                  L"La machine reçoit une nouvelle adresse MAC et un nouvel identifiant : elle peut tourner à côté de "
+                  L"celle d'origine. Le disque est recréé sans l'historique des instantanés ; seuls les blocs utilisés "
+                  L"prennent de la place.",
+                  kLeft, 118, kRight - kLeft, 60, ui::Font().caption, color::kSecondary);
+        AddStatic(-1, L"", kLeft, kHeight - 86, kRight - kLeft, 34, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
+        AddButton(-1, IDOK, L"Importer", kRight - 212, kHeight - 46, 100, 32, true);
+        AddButton(-1, IDCANCEL, L"Annuler", kRight - 100, kHeight - 46, 100, 32);
+    }
+
+    void Focus() override
+    {
+        SetFocus(Item(IdCloneName));
+        SendMessageW(Item(IdCloneName), EM_SETSEL, 0, -1);
+    }
+
+    bool Commit() override
+    {
+        std::wstring error;
+        const auto name = TextOf(IdCloneName);
+        if (!CheckNewVmName(name, library_, vms_, error)) {
+            Fail(-1, IdCloneName, error);
+            return false;
+        }
+        name_ = name;
+        return true;
+    }
+
+    std::wstring summary_;
+    std::wstring suggestedName_;
+    const fs::path& library_;
+    const std::vector<VmEntry>& vms_;
+    std::wstring& name_;
+};
+
+void ShowError(HWND owner, const wchar_t* title, const std::wstring& text)
+{
+    MessageBoxW(owner, text.c_str(), title, MB_OK | MB_ICONWARNING);
+}
+
+} // namespace
+
+std::wstring ShowExportDialog(HWND owner, const VmEntry& vm, bool stopped, std::uint32_t snapshot)
+{
+    if (snapshot == 0 && !stopped) {
+        ShowError(owner, L"Exporter une machine",
+                  L"« " + vm.config.name + L" » est allumée : son disque change pendant qu'elle tourne.\n\n"
+                  L"Éteins-la, ou exporte un de ses instantanés depuis la fenêtre Instantanés.");
+        return {};
+    }
+    const auto target = BrowseFile(owner, L"Machine Virtualiseur (*.vrtx)\0*.vrtx\0\0", L"Exporter la machine", true, L"vrtx",
+                                   vm.config.name + L".vrtx");
+    if (target.empty()) return {};
+    std::wstring message;
+    bool cancelled = false;
+    ProgressDialog progress(L"Export de « " + vm.config.name + L" » : compression des blocs utilisés du disque…",
+                            [&](const Progress& report) {
+                                return ExportVm(vm, stopped, snapshot, target, report, cancelled, message);
+                            });
+    const bool ok = progress.Run(owner, L"Exporter « " + vm.config.name + L" »", ProgressDialog::kWidth, ProgressDialog::kHeight);
+    if (!ok && !cancelled) ShowError(owner, L"Exporter une machine", message);
+    return message;
+}
+
+std::wstring ShowImportDialog(HWND owner, const fs::path& library, const std::vector<VmEntry>& vms, std::wstring& message)
+{
+    message.clear();
+    const auto archive = BrowseFile(owner, L"Machine Virtualiseur (*.vrtx)\0*.vrtx\0Tous les fichiers\0*.*\0\0",
+                                    L"Importer une machine", false, L"vrtx", L"");
+    if (archive.empty()) return {};
+    ArchivePreview preview;
+    std::wstring error;
+    if (!PreviewArchive(archive, preview, error)) {
+        ShowError(owner, L"Importer une machine", L"Ce fichier ne peut pas être importé.\n\n" + error);
+        return {};
+    }
+    // A free name: "<name>", else "<name> (2)", "(3)"…
+    std::wstring suggested = preview.name;
+    std::wstring ignored;
+    for (int index = 2; !CheckNewVmName(suggested, library, vms, ignored) && index < 100; ++index) {
+        suggested = preview.name + L" (" + std::to_wstring(index) + L")";
+    }
+    std::wstring summary = fs::path(archive).filename().wstring() + L"\n";
+    summary += preview.os.empty() ? std::wstring(L"Linux") : preview.os;
+    if (preview.memoryMiB != 0) summary += L"  ·  " + FormatNumber(preview.memoryMiB) + L" Mio";
+    if (preview.cpus != 0) summary += L", " + std::to_wstring(preview.cpus) + (preview.cpus > 1 ? L" processeurs" : L" processeur");
+    summary += L"  ·  disque de " + FormatBytes(preview.diskBytes);
+    std::wstring name;
+    ImportDialog dialog(summary, suggested, library, vms, name);
+    if (!dialog.Run(owner, L"Importer une machine", ImportDialog::kWidth, ImportDialog::kHeight)) return {};
+
+    bool cancelled = false;
+    ProgressDialog progress(L"Import de « " + name + L" » : vérification et écriture du disque…", [&](const Progress& report) {
+        return ImportVm(archive, name, library, vms, report, cancelled, message);
+    });
+    if (progress.Run(owner, L"Importer « " + name + L" »", ProgressDialog::kWidth, ProgressDialog::kHeight)) return name;
+    if (!cancelled) ShowError(owner, L"Importer une machine", message);
+    return {};
+}
+
 class SnapshotsDialog final : public Form {
 public:
     SnapshotsDialog(const VmEntry& vm, bool stopped, const fs::path& library, const std::vector<VmEntry>& vms)
@@ -1838,6 +2071,7 @@ private:
         AddButton(-1, IdSnapshotRestore, L"Restaurer", kLeft, 420, 140);
         AddButton(-1, IdSnapshotDelete, L"Supprimer", kLeft + 150, 420, 140);
         AddButton(-1, IdSnapshotClone, L"Cloner…", kLeft + 300, 420, 140);
+        AddButton(-1, IdSnapshotExport, L"Exporter…", kLeft + 450, 420, 142);
         AddStatic(-1, L"", kLeft, kHeight - 84, kRight - kLeft, 34, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
         AddButton(-1, IDCANCEL, L"Fermer", kRight - 100, kHeight - 46, 100, 32);
         AddButton(-1, IdCloneCancel, L"Annuler la copie", kRight - 280, kHeight - 46, 170, 32);
@@ -1926,6 +2160,12 @@ private:
     {
         if (id == IdSnapshotList && code == LBN_SELCHANGE) ShowSelection();
         if (id == IdSnapshotClone && code == BN_CLICKED) Clone();
+        if (id == IdSnapshotExport && code == BN_CLICKED) {
+            // The selected snapshot, or the current state (machine off).
+            const auto* snapshot = SelectedSnapshot();
+            const auto message = ShowExportDialog(window_, vm_, stopped_, snapshot != nullptr ? snapshot->id : 0);
+            if (!message.empty()) SetMessage(message, false);
+        }
         if (id == IdCloneCancel && code == BN_CLICKED) cancel_ = true;
         if (id == IdSnapshotRestore && code == BN_CLICKED) {
             const auto* snapshot = SelectedSnapshot();
@@ -1978,7 +2218,7 @@ private:
         std::wstring message;
         // Everything but "Annuler la copie" is disabled during the copy.
         std::vector<HWND> disabled;
-        for (const int id : std::initializer_list<int>{IdSnapshotList, IdSnapshotName, IDOK, IdSnapshotRestore, IdSnapshotDelete, IdSnapshotClone, IDCANCEL}) {
+        for (const int id : std::initializer_list<int>{IdSnapshotList, IdSnapshotName, IDOK, IdSnapshotRestore, IdSnapshotDelete, IdSnapshotClone, IdSnapshotExport, IDCANCEL}) {
             if (HWND control = Item(id); control != nullptr && IsWindowEnabled(control)) {
                 EnableWindow(control, FALSE);
                 disabled.push_back(control);
@@ -2178,6 +2418,7 @@ private:
         SetText(IdSnapshotDetail, detail);
         EnableWindow(Item(IdSnapshotRestore), stopped_ && snapshot != nullptr);
         EnableWindow(Item(IdSnapshotDelete), stopped_ && snapshot != nullptr);
+        EnableWindow(Item(IdSnapshotExport), stopped_ || snapshot != nullptr); // Running: snapshots only.
         EnableWindow(Item(IDOK), TRUE); // Running: taken live by the VM.
     }
 

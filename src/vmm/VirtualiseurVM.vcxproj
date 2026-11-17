@@ -76,6 +76,7 @@
     <ClCompile Include="core\Log.cpp" />
     <ClCompile Include="core\GuestMemory.cpp" />
     <ClCompile Include="core\SharedGpu.cpp" />
+    <ClCompile Include="core\Thumbnail.cpp" />
     <ClCompile Include="devices\AcpiPm.cpp" />
     <ClCompile Include="devices\IdeController.cpp" />
     <ClCompile Include="devices\IoApic.cpp" />

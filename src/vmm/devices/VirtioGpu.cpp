@@ -1026,6 +1026,67 @@ void VirtioGpu::Cursor3d(const Command& command)
 
 // --- UI side -------------------------------------------------------------------------------------
 
+bool VirtioGpu::SnapshotScanout(std::vector<std::uint8_t>& pixels, std::uint32_t& width, std::uint32_t& height)
+{
+    if (textureActive_.load()) {
+        {
+            const std::lock_guard lock(displayMutex_);
+            if (!scanoutActive_) return false;
+            width = scanoutRect_.width;
+            height = scanoutRect_.height;
+        }
+        ID3D11Device* device = SharedD3DDevice();
+        if (device == nullptr) return false;
+        // The window and the GPU thread use the device under this lock too.
+        const SharedD3DGuard d3d(SharedD3DLock());
+        if (!shared_->texture) return false;
+        D3D11_TEXTURE2D_DESC description{};
+        shared_->texture->GetDesc(&description);
+        width = (std::min)(width, description.Width);
+        height = (std::min)(height, description.Height);
+        if (width == 0 || height == 0) return false;
+        description.Width = width;
+        description.Height = height;
+        description.MipLevels = 1;
+        description.ArraySize = 1;
+        description.Usage = D3D11_USAGE_STAGING;
+        description.BindFlags = 0;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        description.MiscFlags = 0;
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+        if (FAILED(device->CreateTexture2D(&description, nullptr, &staging))) return false;
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+        device->GetImmediateContext(&context);
+        const D3D11_BOX box{0, 0, 0, width, height, 1};
+        context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, shared_->texture.Get(), 0, &box);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+        pixels.resize(static_cast<std::size_t>(width) * height * 4);
+        for (std::uint32_t row = 0; row < height; ++row) {
+            std::memcpy(pixels.data() + static_cast<std::size_t>(row) * width * 4,
+                        static_cast<const std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(row) * mapped.RowPitch,
+                        static_cast<std::size_t>(width) * 4);
+        }
+        context->Unmap(staging.Get(), 0);
+        return true;
+    }
+    // 2D: a copy of the scanout rectangle under the display lock.
+    const std::lock_guard lock(displayMutex_);
+    if (!scanoutActive_ || !scanout_) return false;
+    const auto& rect = scanoutRect_;
+    width = rect.width;
+    height = rect.height;
+    if (width == 0 || height == 0) return false;
+    pixels.resize(static_cast<std::size_t>(width) * height * 4);
+    const auto sourceStride = static_cast<std::size_t>(scanout_->width) * 4;
+    const auto* source = scanout_->pixels.data() + rect.y * sourceStride + rect.x * 4ull;
+    for (std::uint32_t row = 0; row < height; ++row) {
+        std::memcpy(pixels.data() + static_cast<std::size_t>(row) * width * 4, source + row * sourceStride,
+                    static_cast<std::size_t>(width) * 4);
+    }
+    return true;
+}
+
 bool VirtioGpu::CopyScanout(ScanoutCopy& copy, DirtyRows& rows)
 {
     if (textureActive_.load()) {

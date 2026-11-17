@@ -48,6 +48,9 @@ public:
     // image), reopens it read-only and puts the empty layer `newTop` (whose
     // parent it is) on top. In-flight I/O completes first; new I/O waits.
     void PushLayer(const std::filesystem::path& newTop);
+    // Blocks (LayerFile::kBlockSize) that may hold data: allocated in a layer,
+    // or not a hole of the raw base. Others read as zeros.
+    std::vector<std::uint64_t> DataBlocks() const;
 
     // Full clone: writes what `source` (a raw image or a layer chain) shows
     // into a new raw image `target`, created sparse (FSCTL_SET_SPARSE before
@@ -60,8 +63,6 @@ private:
     VirtualDisk(HANDLE file, std::filesystem::path path, std::uint64_t sizeBytes, bool readOnly) noexcept;
     void Close() noexcept;
     // Reads part of `block` from the first layer at or below `fromLayer` that has it, else from the base.
-    // Blocks that may hold data: allocated in a layer, or not a hole of the raw base.
-    std::vector<std::uint64_t> DataBlocks() const;
     void ReadFromChain(std::size_t fromLayer, std::uint64_t block, std::uint32_t offset, std::span<std::byte> destination) const;
 
     HANDLE file_ = INVALID_HANDLE_VALUE;

@@ -56,4 +56,15 @@ inline constexpr int kSnapshotsChanged = 1;
 inline constexpr int kLibraryChanged = 2; // A clone was created.
 int ShowSnapshotsDialog(HWND owner, const VmEntry& vm, bool stopped, const fs::path& library, const std::vector<VmEntry>& vms);
 
+// Export to a .vrtx file (Machine → Exporter…, Instantanés → Exporter…):
+// asks for the file, then exports with a progress window (Annuler). Snapshot 0:
+// the current state, machine off. Returns a status message, empty if the
+// user gave up before exporting (failures are also shown in a message box).
+std::wstring ShowExportDialog(HWND owner, const VmEntry& vm, bool stopped, std::uint32_t snapshot);
+
+// Import of a .vrtx file (Fichier → Importer une machine…): file, name, then
+// the copy with a progress window. Returns the new machine's name, empty if
+// nothing was imported; `message` is set for the status bar.
+std::wstring ShowImportDialog(HWND owner, const fs::path& library, const std::vector<VmEntry>& vms, std::wstring& message);
+
 } // namespace manager

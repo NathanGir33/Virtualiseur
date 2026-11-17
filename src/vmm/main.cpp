@@ -444,6 +444,9 @@ void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
                     else vm->SetMicrophoneEnabled(command == "mic on");
                 } else if (command == "mic") reply = vm->MicrophoneEnabled() ? "on" : "off";
                 else if (command == "timesync") vm->SyncGuestTime("demande par le tube");
+                else if (command.rfind("thumbnail ", 0) == 0) {
+                    reply = vm->WriteThumbnail(Utf8Path(command.substr(10)), 320) ? "ok" : "none";
+                }
                 else if (command.rfind("snapshot-take ", 0) == 0) {
                     // Live disk snapshot: "ok <id> <frozen|crash> <detail>" or "error: ...".
                     try {

@@ -7,6 +7,7 @@
 #include <Windows.h>
 #include <commctrl.h>
 
+#include <memory>
 #include <string>
 
 namespace ui {
@@ -113,6 +114,24 @@ void SetFlatButton(HWND button, wchar_t glyph, const std::wstring& label, COLORR
 void SetFlatButtonColor(HWND button, COLORREF glyphColor); // After a theme change.
 // WM_DRAWITEM handler for flat buttons; returns false for other controls.
 bool DrawFlatButton(const DRAWITEMSTRUCT& item, COLORREF background);
+
+// An image loaded from a file (PNG, BMP...). The file is read into memory and
+// released at once: another process may replace it at any time.
+class Picture final {
+public:
+    static std::unique_ptr<Picture> Load(const std::wstring& path);
+    ~Picture();
+    Picture(const Picture&) = delete;
+    Picture& operator=(const Picture&) = delete;
+    int Width() const;
+    int Height() const;
+    void Draw(HDC dc, const RECT& rect) const; // Smoothly scaled to `rect`.
+
+private:
+    Picture() = default;
+    void* bitmap_ = nullptr; // Gdiplus::Bitmap*
+    void* stream_ = nullptr; // IStream*, kept alive with the bitmap.
+};
 
 // Off-screen buffer for flicker-free painting.
 class BufferedPaint final {

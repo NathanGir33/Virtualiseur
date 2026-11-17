@@ -57,6 +57,7 @@
     <ClCompile Include="..\..\backend\whp\DiskLayer.cpp" />
     <ClCompile Include="..\..\backend\whp\DiskSnapshots.cpp" />
     <ClCompile Include="..\..\backend\whp\VirtualDisk.cpp" />
+    <ClCompile Include="..\..\backend\whp\MachineArchive.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="VmLibrary.h" />

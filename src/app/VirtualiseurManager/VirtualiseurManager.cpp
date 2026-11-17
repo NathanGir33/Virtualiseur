@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,8 @@ enum CommandId : int {
     IdThemeSystem,
     IdThemeLight,
     IdThemeDark,
+    IdImport,
+    IdExport,
 };
 
 COLORREF ToolbarColor(int id, bool paused = false);
@@ -82,6 +85,9 @@ bool g_virgl = false;
 int g_detailsScroll = 0;
 int g_detailsHeight = 0;
 std::vector<std::pair<RECT, int>> g_cardHeaders; // Details: clickable card titles -> settings page.
+std::unique_ptr<ui::Picture> g_thumbnail; // Screen of the selected machine while it runs.
+std::wstring g_thumbnailVm;              // The machine it shows.
+unsigned g_timerTicks = 0;
 
 VmEntry* Selected()
 {
@@ -160,6 +166,7 @@ void RefreshList()
 }
 
 void UpdateDetailsScroll();
+void RefreshThumbnail(bool capture);
 
 void UpdateCommands()
 {
@@ -174,6 +181,7 @@ void UpdateCommands()
     enable(IdSettings, vm != nullptr && stopped);
     enable(IdDelete, vm != nullptr && stopped);
     enable(IdSnapshots, vm != nullptr);
+    enable(IdExport, vm != nullptr && stopped); // Running: export a snapshot (Instantanés).
     enable(IdStart, vm != nullptr && stopped);
     enable(IdPause, live && (state == RunState::Running || state == RunState::Paused));
     enable(IdShutdown, live);
@@ -193,6 +201,7 @@ void Select(int index)
     g_selected = g_vms.empty() ? -1 : std::clamp(index, 0, static_cast<int>(g_vms.size()) - 1);
     SendMessageW(g_list, LB_SETCURSEL, static_cast<WPARAM>(g_selected), 0);
     if (auto* vm = Selected()) RefreshDiskInfo(*vm);
+    RefreshThumbnail(true); // Drops the previous machine's screen, captures this one's.
     g_detailsScroll = 0;
     UpdateCommands();
     UpdateDetailsScroll();
@@ -245,6 +254,40 @@ void PollStates()
         InvalidateRect(g_details, nullptr, FALSE);
         UpdateCommands();
     }
+}
+
+// Screen preview of the selected machine: the VM writes a small PNG
+// (screen.png in its folder, replaced atomically) on request. `capture`
+// asks for a new one; otherwise only drops a preview that no longer applies.
+void RefreshThumbnail(bool capture)
+{
+    const auto* vm = Selected();
+    const bool live = vm != nullptr && (vm->state == RunState::Running || vm->state == RunState::Paused);
+    if (!live || vm->config.name != g_thumbnailVm) {
+        if (g_thumbnail) {
+            g_thumbnail.reset();
+            g_thumbnailVm.clear();
+            UpdateDetailsScroll();
+            InvalidateRect(g_details, nullptr, FALSE);
+        }
+    }
+    if (!live || !capture || (vm->state == RunState::Paused && g_thumbnail)) return;
+    const auto path = vm->directory / L"screen.png";
+    const auto wide = path.wstring();
+    const int length = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    std::string command = "thumbnail ";
+    const auto offset = command.size();
+    command.resize(offset + static_cast<std::size_t>(length));
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), command.data() + offset, length, nullptr, nullptr);
+    const auto reply = SendCommand(vm->config.name, command.c_str());
+    if (!reply || *reply != "ok") return; // No screen yet: keep what is shown.
+    auto picture = ui::Picture::Load(wide);
+    if (!picture) return;
+    const bool layout = !g_thumbnail; // The header grows to fit the preview.
+    g_thumbnail = std::move(picture);
+    g_thumbnailVm = vm->config.name;
+    if (layout) UpdateDetailsScroll();
+    InvalidateRect(g_details, nullptr, FALSE);
 }
 
 // --- Commands -----------------------------------------------------------------------------------
@@ -384,6 +427,24 @@ void OpenSnapshots()
     }
 }
 
+void ExportMachine()
+{
+    auto* vm = Selected();
+    if (vm == nullptr) return;
+    const auto message = ShowExportDialog(g_window, *vm, vm->state == RunState::Stopped, 0);
+    if (!message.empty()) SetStatus(message);
+}
+
+void ImportMachine()
+{
+    std::wstring message;
+    const auto name = ShowImportDialog(g_window, g_library, g_vms, message);
+    if (!message.empty()) SetStatus(message);
+    if (name.empty()) return;
+    Reload(name);
+    PollStates();
+}
+
 // Linked clones built on this machine's snapshots (still existing on disk).
 std::wstring LinkedCloneNames(const VmEntry& vm)
 {
@@ -512,6 +573,7 @@ void ShowContextMenu(POINT screen)
     HMENU menu = CreatePopupMenu();
     if (vm == nullptr) {
         AppendMenuW(menu, MF_STRING, IdNew, L"&Nouvelle machine…");
+        AppendMenuW(menu, MF_STRING, IdImport, L"&Importer une machine…");
     } else {
         const bool stopped = vm->state == RunState::Stopped;
         const bool live = !stopped;
@@ -522,6 +584,7 @@ void ShowContextMenu(POINT screen)
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (stopped ? 0 : MF_GRAYED), IdSettings, L"&Configuration…");
         AppendMenuW(menu, MF_STRING, IdSnapshots, L"&Instantanés…");
+        AppendMenuW(menu, MF_STRING | (stopped ? 0 : MF_GRAYED), IdExport, L"&Exporter…");
         AppendMenuW(menu, MF_STRING, IdOpenFolder, L"&Ouvrir le dossier");
         AppendMenuW(menu, MF_STRING | (PathExists(vm->directory / L"vmm.log") ? 0 : MF_GRAYED), IdShowLog, L"Afficher le &journal");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -692,13 +755,28 @@ int PaintDetails(HDC dc, const RECT& client, int scroll, bool draw)
     // Header: state tile, name, then state (in its color), system and size.
     int y = margin - scroll;
     RECT badgeRect{margin, y, margin + Scale(60), y + Scale(60)};
+    // Screen preview on the right of the header while the machine runs.
+    int textRight = client.right - margin;
+    int headerHeight = Scale(60);
+    if (g_thumbnail && g_thumbnailVm == vm->config.name && g_thumbnail->Width() > 0 &&
+        client.right - margin * 2 >= Scale(560)) {
+        const int previewWidth = (std::min)(Scale(240), static_cast<int>(client.right - margin * 2) / 3);
+        const int previewHeight = static_cast<int>(static_cast<long long>(previewWidth) * g_thumbnail->Height() / g_thumbnail->Width());
+        RECT frame{client.right - margin - previewWidth - Scale(2), y, client.right - margin, y + previewHeight + Scale(2)};
+        if (draw) {
+            ui::RoundedRect(dc, frame, Scale(4), color::kBorder);
+            g_thumbnail->Draw(dc, RECT{frame.left + Scale(1), frame.top + Scale(1), frame.right - Scale(1), frame.bottom - Scale(1)});
+        }
+        textRight = frame.left - Scale(16);
+        headerHeight = (std::max)(headerHeight, static_cast<int>(frame.bottom - frame.top));
+    }
     if (draw) {
         DrawStateTile(dc, badgeRect, vm->state, Scale(12), ui::Font().glyphLarge);
-        RECT name{badgeRect.right + Scale(16), y + Scale(2), client.right - margin, y + Scale(36)};
+        RECT name{badgeRect.right + Scale(16), y + Scale(2), textRight, y + Scale(36)};
         ui::Text(dc, vm->config.name, name, ui::Font().title, color::kText);
         RECT dot{badgeRect.right + Scale(17), y + Scale(43), badgeRect.right + Scale(25), y + Scale(51)};
         ui::Circle(dc, dot, StateColor(vm->state));
-        RECT state{dot.right + Scale(8), y + Scale(36), client.right - margin, y + Scale(58)};
+        RECT state{dot.right + Scale(8), y + Scale(36), textRight, y + Scale(58)};
         const std::wstring stateText = StateText(vm->state);
         ui::Text(dc, stateText, state, ui::Font().bold, StateColor(vm->state));
         state.left += ui::TextWidth(dc, stateText, ui::Font().bold);
@@ -708,7 +786,7 @@ int PaintDetails(HDC dc, const RECT& client, int scroll, bool draw)
                     (vm->config.cpus > 1 ? L" processeurs" : L" processeur");
         ui::Text(dc, subtitle, state, ui::Font().body, color::kSecondary);
     }
-    y += Scale(60) + Scale(20);
+    y += headerHeight + Scale(20);
 
     // Cards, in one or two columns (shortest column first).
     const auto cards = BuildCards(*vm);
@@ -1077,6 +1155,7 @@ void CreateControls(HWND window)
     g_menu = CreateMenu();
     HMENU file = CreatePopupMenu();
     AppendMenuW(file, MF_STRING, IdNew, L"&Nouvelle machine…\tCtrl+N");
+    AppendMenuW(file, MF_STRING, IdImport, L"&Importer une machine…");
     AppendMenuW(file, MF_STRING, IdOpenLibrary, L"Ouvrir le dossier des &machines");
     AppendMenuW(file, MF_STRING, IdRefresh, L"&Actualiser\tF5");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
@@ -1091,6 +1170,7 @@ void CreateControls(HWND window)
     AppendMenuW(machine, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(machine, MF_STRING, IdSettings, L"&Configuration…\tCtrl+S");
     AppendMenuW(machine, MF_STRING, IdSnapshots, L"&Instantanés…");
+    AppendMenuW(machine, MF_STRING, IdExport, L"&Exporter…");
     AppendMenuW(machine, MF_STRING, IdOpenFolder, L"&Ouvrir le dossier");
     AppendMenuW(machine, MF_STRING, IdShowLog, L"Afficher le &journal");
     AppendMenuW(machine, MF_SEPARATOR, 0, nullptr);
@@ -1166,6 +1246,8 @@ void OnCommand(int id)
     case IdThemeSystem: ApplyTheme(ui::Theme::System, true); break;
     case IdThemeLight: ApplyTheme(ui::Theme::Light, true); break;
     case IdThemeDark: ApplyTheme(ui::Theme::Dark, true); break;
+    case IdImport: ImportMachine(); break;
+    case IdExport: ExportMachine(); break;
     default: break;
     }
 }
@@ -1238,7 +1320,10 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam, LPARA
     case WM_ERASEBKGND:
         return 1;
     case WM_TIMER:
-        if (wParam == kStatusTimer) PollStates();
+        if (wParam == kStatusTimer) {
+            PollStates();
+            RefreshThumbnail(++g_timerTicks % 2 == 0); // A new screen preview every 2 s.
+        }
         return 0;
     case WM_CTLCOLORLISTBOX:
         return reinterpret_cast<LRESULT>(ui::Brush(color::kWindow));

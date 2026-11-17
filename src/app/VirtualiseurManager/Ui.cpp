@@ -3,12 +3,15 @@
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <shlwapi.h>
 
 #include <algorithm>
 #include <map>
+#include <vector>
 
 #pragma comment(lib, "Dwmapi.lib")
 #pragma comment(lib, "UxTheme.lib")
+#pragma comment(lib, "Shlwapi.lib")
 
 namespace Gdiplus {
 using std::max;
@@ -592,6 +595,53 @@ bool HandleMenuBar(HWND window, UINT message, WPARAM wParam, LPARAM lParam, LRES
     default:
         return false;
     }
+}
+
+std::unique_ptr<Picture> Picture::Load(const std::wstring& path)
+{
+    // Share delete: the writer can rename a new file over this one meanwhile.
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return nullptr;
+    LARGE_INTEGER size{};
+    std::vector<BYTE> bytes;
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart < (16 << 20)) {
+        bytes.resize(static_cast<std::size_t>(size.QuadPart));
+        DWORD read = 0;
+        if (!ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) || read != bytes.size()) bytes.clear();
+    }
+    CloseHandle(file);
+    if (bytes.empty()) return nullptr;
+    IStream* stream = SHCreateMemStream(bytes.data(), static_cast<UINT>(bytes.size()));
+    if (stream == nullptr) return nullptr;
+    auto* bitmap = Gdiplus::Bitmap::FromStream(stream);
+    if (bitmap == nullptr || bitmap->GetLastStatus() != Gdiplus::Ok) {
+        delete bitmap;
+        stream->Release();
+        return nullptr;
+    }
+    std::unique_ptr<Picture> picture(new Picture());
+    picture->bitmap_ = bitmap;
+    picture->stream_ = stream;
+    return picture;
+}
+
+Picture::~Picture()
+{
+    delete static_cast<Gdiplus::Bitmap*>(bitmap_);
+    if (stream_ != nullptr) static_cast<IStream*>(stream_)->Release();
+}
+
+int Picture::Width() const { return static_cast<int>(static_cast<Gdiplus::Bitmap*>(bitmap_)->GetWidth()); }
+int Picture::Height() const { return static_cast<int>(static_cast<Gdiplus::Bitmap*>(bitmap_)->GetHeight()); }
+
+void Picture::Draw(HDC dc, const RECT& rect) const
+{
+    Gdiplus::Graphics graphics(dc);
+    graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    graphics.DrawImage(static_cast<Gdiplus::Bitmap*>(bitmap_), static_cast<INT>(rect.left), static_cast<INT>(rect.top),
+                       static_cast<INT>(rect.right - rect.left), static_cast<INT>(rect.bottom - rect.top));
 }
 
 BufferedPaint::BufferedPaint(HDC target, const RECT& rect) : target_(target), rect_(rect)

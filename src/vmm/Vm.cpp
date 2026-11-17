@@ -12,6 +12,7 @@
 #include "devices/VirtioNet.h"
 #include "devices/VirtioSound.h"
 #include "devices/Virtio9p.h"
+#include "core/Thumbnail.h"
 #include "DiskSnapshots.h"
 #include "firmware/AcpiTables.h"
 #include "net/BridgeNetworkBackend.h"
@@ -719,6 +720,29 @@ std::uint32_t Vm::TakeLiveSnapshot(const std::wstring& name, std::string& state,
     VMM_INFO("Instantané %u pris, machine allumée : %s. Couche active : %s.", take.id, detail.c_str(),
              PathUtf8(take.layer.filename()).c_str());
     return take.id;
+}
+
+bool Vm::WriteThumbnail(const std::filesystem::path& path, std::uint32_t maxWidth)
+{
+    // A private copy of the screen first (under the display locks), then the
+    // scaling and PNG encoding without holding anything.
+    std::vector<std::uint8_t> pixels;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    if (virtioGpu_ == nullptr || !virtioGpu_->SnapshotScanout(pixels, width, height)) {
+        if (config_.display != DisplayMode::Graphics || !framebuffer_) return false;
+        // Boot framebuffer (vesafb/simpledrm) in guest memory, XRGB8888.
+        width = framebuffer_->width;
+        height = framebuffer_->height;
+        const auto* source = memory_->Framebuffer();
+        if (source == nullptr || width == 0 || height == 0) return false;
+        pixels.resize(static_cast<std::size_t>(width) * height * 4);
+        for (std::uint32_t row = 0; row < height; ++row) {
+            std::memcpy(pixels.data() + static_cast<std::size_t>(row) * width * 4,
+                        source + static_cast<std::size_t>(row) * framebuffer_->stride, static_cast<std::size_t>(width) * 4);
+        }
+    }
+    return WritePngThumbnail(pixels.data(), width, height, static_cast<std::size_t>(width) * 4, path, maxWidth);
 }
 
 void Vm::SyncGuestTime(const char* reason)

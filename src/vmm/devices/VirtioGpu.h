@@ -66,6 +66,10 @@ public:
     // the rows changed since the previous call into `copy` and adds them to
     // `rows`.
     bool CopyScanout(ScanoutCopy& copy, DirtyRows& rows);
+    // Whole current screen as BGRX (stride = width * 4), for a thumbnail: a
+    // separate copy that leaves the window's dirty rows alone. In the virgl
+    // texture mode the shared texture is read back through a staging texture.
+    bool SnapshotScanout(std::vector<std::uint8_t>& pixels, std::uint32_t& width, std::uint32_t& height);
     // Copies the cursor state; the image is copied only when its serial
     // differs from `cursor.shapeSerial`. Returns true if anything changed.
     bool CursorSnapshot(GpuCursor& cursor);
