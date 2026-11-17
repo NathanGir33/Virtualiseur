@@ -17,6 +17,7 @@
 #include "net/SlirpNetworkBackend.h"
 
 #include <WinHvEmulation.h>
+#include <powrprof.h>
 
 #include <algorithm>
 #include <array>
@@ -65,12 +66,14 @@ constexpr std::uint8_t kVirtioGpuSlot = 5;
 constexpr std::uint8_t kVirtioTabletSlot = 6;
 constexpr std::uint8_t kVirtioSerialSlot = 7;
 constexpr std::uint8_t kVirtioSoundSlot = 8;
+constexpr std::uint8_t kQemuAgentSlot = 9;
 constexpr std::uint32_t kVirtioNetGsi = 11;
 constexpr std::uint32_t kVirtioBlkGsi = 10;
 constexpr std::uint32_t kVirtioGpuGsi = 16;
 constexpr std::uint32_t kVirtioTabletGsi = 17;
 constexpr std::uint32_t kVirtioSerialGsi = 18;
 constexpr std::uint32_t kVirtioSoundGsi = 19;
+constexpr std::uint32_t kQemuAgentGsi = 20;
 constexpr std::uint32_t kVirtioMmioBase = 0xFE000000;
 
 std::string PathUtf8(const std::filesystem::path& path)
@@ -167,6 +170,7 @@ Vm::Vm(const VmConfig& config, SerialOutput serialOutput)
 
 Vm::~Vm()
 {
+    if (powerNotify_ != nullptr) PowerUnregisterSuspendResumeNotification(powerNotify_);
     RequestStop(exitReason_.load());
     {
         const std::lock_guard lock(pauseMutex_);
@@ -180,6 +184,7 @@ Vm::~Vm()
     // notification threads first, they reach the network backend.
     for (auto& function : pciFunctions_) function->Shutdown();
     agent_.reset();
+    qemuAgent_.reset();
     network_.reset();
     pciFunctions_.clear();
     pit_.reset();
@@ -334,6 +339,19 @@ void Vm::BuildDevices()
         pciFunctions_.push_back(std::move(serial));
     }
 
+    {
+        // qemu-guest-agent port: keeps the guest clock on the host's.
+        qemuAgent_ = std::make_unique<QemuGuestAgent>();
+        auto* agent = qemuAgent_.get();
+        auto serial = std::make_unique<VirtioSerial>(
+            *memory_, placement(kQemuAgentSlot, kQemuAgentGsi), QemuGuestAgent::kPortName,
+            [agent](std::span<const std::uint8_t> data) { agent->OnBytes(data); },
+            [agent](bool open) { agent->OnOpen(open); });
+        agent->Attach(serial.get());
+        pciBus_->Add(kQemuAgentSlot, 0, serial.get());
+        pciFunctions_.push_back(std::move(serial));
+    }
+
     if (config_.audio) {
         try {
             auto sound = std::make_unique<VirtioSound>(*memory_, placement(kVirtioSoundSlot, kVirtioSoundGsi),
@@ -354,7 +372,8 @@ void Vm::BuildDevices()
                       {kVirtioGpuSlot, static_cast<std::uint8_t>(kVirtioGpuGsi)},
                       {kVirtioTabletSlot, static_cast<std::uint8_t>(kVirtioTabletGsi)},
                       {kVirtioSerialSlot, static_cast<std::uint8_t>(kVirtioSerialGsi)},
-                      {kVirtioSoundSlot, static_cast<std::uint8_t>(kVirtioSoundGsi)}};
+                      {kVirtioSoundSlot, static_cast<std::uint8_t>(kVirtioSoundGsi)},
+                      {kQemuAgentSlot, static_cast<std::uint8_t>(kQemuAgentGsi)}};
     const auto rsdp = BuildAcpiTables(*memory_, acpi);
     (void)rsdp;
 }
@@ -393,23 +412,25 @@ void Vm::LoadBootImage()
             VMM_INFO("Installation automatique: %s injecté comme /preseed.cfg.", config_.preseed.string().c_str());
         }
         const bool debianInstaller = selection->description.rfind("installateur Debian", 0) == 0;
-        if (config_.guestTools && debianInstaller && agent_) {
-            // Guest tools: once the installation is done, install the agent
-            // (clipboard, file drops) if a desktop was chosen. The installer
+        if (config_.guestTools && debianInstaller) {
+            // Guest tools: once the installation is done, install
+            // qemu-guest-agent (clock kept on the host's) and, if a desktop
+            // was chosen, spice-vdagent (clipboard, file drops). The installer
             // loads /preseed.cfg from its initrd on its own; without
             // "auto=true" it asks the usual questions. Without network, apt
             // fails quietly and the installation goes on.
             const std::string existing(preseed.begin(), preseed.end());
             if (existing.find("preseed/late_command") != std::string::npos) {
-                VMM_WARN("Le preseed définit déjà preseed/late_command : spice-vdagent n'y est pas ajouté.");
+                VMM_WARN("Le preseed définit déjà preseed/late_command : les outils invité n'y sont pas ajoutés.");
             } else {
                 const std::string line =
-                    "\n# Virtualiseur : agent invité (presse-papiers partagé, dépôt de fichiers).\n"
-                    "d-i preseed/late_command string if [ -d /target/usr/share/xsessions ] || "
-                    "[ -d /target/usr/share/wayland-sessions ]; then in-target apt-get install -y "
-                    "spice-vdagent || true; fi\n";
+                    "\n# Virtualiseur : agents invité (heure synchronisée ; avec un bureau, presse-papiers "
+                    "partagé et dépôt de fichiers).\n"
+                    "d-i preseed/late_command string in-target apt-get install -y qemu-guest-agent || true; "
+                    "if [ -d /target/usr/share/xsessions ] || [ -d /target/usr/share/wayland-sessions ]; then "
+                    "in-target apt-get install -y spice-vdagent || true; fi\n";
                 preseed.insert(preseed.end(), line.begin(), line.end());
-                VMM_INFO("Outils invité : spice-vdagent sera installé avec le bureau.");
+                VMM_INFO("Outils invité : qemu-guest-agent sera installé, et spice-vdagent avec le bureau.");
             }
         }
         if (!preseed.empty()) AppendFileToInitrd(selection->image.initrd, "/preseed.cfg", preseed);
@@ -446,9 +467,24 @@ void Vm::LoadBootImage()
     partition_->SetLocalApicRegister(0, 0x0F0, 0x000001FF);
 }
 
+namespace {
+
+// Host sleep: the guest clock is checked when the host wakes up.
+ULONG CALLBACK HostPowerCallback(PVOID context, ULONG type, PVOID)
+{
+    if (type == PBT_APMRESUMEAUTOMATIC) static_cast<Vm*>(context)->SyncGuestTime("réveil de l'hôte");
+    return 0;
+}
+
+} // namespace
+
 void Vm::Start()
 {
     state_ = VmState::Running;
+    powerSubscription_ = {&HostPowerCallback, this};
+    if (PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, &powerSubscription_, &powerNotify_) != ERROR_SUCCESS) {
+        powerNotify_ = nullptr;
+    }
     for (std::uint32_t index = 0; index < config_.cpus; ++index) {
         vcpus_.emplace_back([this, index] { VcpuThread(index); });
     }
@@ -482,6 +518,7 @@ void Vm::RequestStop(VmExit reason)
 void Vm::Pause()
 {
     if (state_ != VmState::Running) return;
+    if (qemuAgent_) qemuAgent_->SetSuspended(true);
     {
         const std::lock_guard lock(pauseMutex_);
         paused_ = true;
@@ -501,6 +538,10 @@ void Vm::Resume()
     state_ = VmState::Running;
     pauseCondition_.notify_all();
     VMM_INFO("VM reprise.");
+    if (qemuAgent_) {
+        qemuAgent_->SetSuspended(false);
+        qemuAgent_->RequestTimeSync("reprise après une pause");
+    }
 }
 
 void Vm::PowerOff()
@@ -588,6 +629,11 @@ VmConfig Vm::CurrentConfig() const
 {
     const DeviceGuard guard(deviceLock_);
     return config_;
+}
+
+void Vm::SyncGuestTime(const char* reason)
+{
+    if (qemuAgent_) qemuAgent_->RequestTimeSync(reason);
 }
 
 DisplaySnapshot Vm::Display() const
@@ -710,6 +756,10 @@ std::string Vm::Statistics() const
         if (virtioGpu_->Accelerated()) text << " gpu_submit_3d=" << virtioGpu_->Submits();
     }
     if (sound_ != nullptr) text << " audio_octets=" << sound_->PlayedBytes();
+    if (qemuAgent_) {
+        if (const auto offset = qemuAgent_->LastOffsetMs()) text << " ecart_horloge_ms=" << *offset;
+        else text << " agent_qemu=" << (qemuAgent_->Connected() ? "connecte" : "absent");
+    }
     return text.str();
 }
 

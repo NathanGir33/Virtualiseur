@@ -45,6 +45,7 @@ Moniteur de machine virtuelle de Virtualiseur. Il crée une partition WHP, y pla
 | 00:06.0 virtio-input | GSI 17 sans MSI-X | tablette (ABS_X/Y 0-32767, 5 boutons, molettes) |
 | 00:07.0 virtio-serial | GSI 18 sans MSI-X | multiport ; port 1 `com.redhat.spice.0` pour spice-vdagent |
 | 00:08.0 virtio-sound | GSI 19 sans MSI-X | un flux de sortie S16, 1-2 canaux, 8-96 kHz ; `--audio off` le retire |
+| 00:09.0 virtio-serial | GSI 20 sans MSI-X | port `org.qemu.guest_agent.0` pour qemu-guest-agent (heure de l'invité) |
 | VGA | 0x3B0-0x3DF | registres du curseur en mode texte |
 
 Toutes les fonctions virtio utilisent le transport moderne virtio 1.0 (`devices/VirtioModern`), avec pour le slot *n* :
@@ -71,6 +72,8 @@ virtio-gpu est déclarée en classe VGA, avec un BAR mémoire posé sur le frame
 Si un mode ne peut pas démarrer (Npcap absent, carte introuvable), la carte reste présente mais câble débranché. Le câble se branche et se débranche aussi pendant l'exécution (menu Périphériques, commande de tube `cable on|off`) : virtio-net change l'état du lien (`VIRTIO_NET_F_STATUS`) et envoie une interruption de changement de configuration, l'invité voit `NO-CARRIER`.
 
 **Affichage** : `ui/DisplayWindow` demande à l'invité la taille de la fenêtre, après une pause de 250 ms pendant un glissement et de 60 ms sinon (agrandissement, ancrage, plein écran). Il le fait aussi dès que le pilote virtio-gpu prend l'écran. Le plein écran (Ctrl droit + F, `--fullscreen`) occupe le moniteur de la fenêtre ; une barre non activante en haut de l'écran donne le menu et la sortie.
+
+**Heure de l'invité (qemu-guest-agent)** : la pause du VMM ne décale pas l'horloge (le temps de la partition WHP continue de courir, mesuré : écart inchangé après 60 s de pause). Pour les autres cas (veille de l'hôte, dérive, heure changée dans l'invité), `agent/QemuGuestAgent` parle le protocole JSON de qemu-guest-agent sur une seconde carte virtio-serial. Il se synchronise par `guest-sync-delimited` (précédé d'un octet 0xFF), compare `guest-get-time` à l'horloge de l'hôte et corrige par `guest-set-time` au-delà de 0,5 s. Les contrôles ont lieu à la connexion de l'agent, à la reprise après une pause, au réveil de l'hôte (`PowerRegisterSuspendResumeNotification`), toutes les minutes et sur la commande de tube `timesync`. Les statistiques donnent l'écart mesuré (`ecart_horloge_ms`). Debian démarre l'agent tout seul quand le port existe (règle udev) ; les outils invité l'installent avec l'installateur Debian.
 
 **Son (virtio-sound)** : `devices/VirtioSound` annonce un flux de sortie (pas de prise jack ni de carte de canaux) au pilote Linux `virtio_snd`. Les requêtes de contrôle (`PCM_INFO`, `SET_PARAMS`, `PREPARE`, `START`, `STOP`, `RELEASE`) sont traitées sur le vCPU qui notifie. Chaque tampon de la file de transmission est copié hors de l'anneau, puis rendu à l'invité par le thread audio quand ses échantillons sont passés à Windows : l'invité est cadencé par l'horloge de la carte son de l'hôte, comme avec un vrai convertisseur. `RELEASE` rend tout ce qui reste en file, comme l'attend le pilote. `audio/WasapiOutput` joue en WASAPI partagé, piloté par événements, avec un tampon de 60 ms ; le moteur audio de Windows convertit la fréquence et le nombre de canaux (`AUTOCONVERTPCM`). Le thread (priorité MMCSS « Pro Audio ») suit le périphérique par défaut et, sans sortie utilisable, consomme les échantillons au rythme du flux pour ne jamais bloquer l'invité.
 
@@ -101,6 +104,6 @@ VirtualiseurVM.exe ... --serial-log serial.log --serial-input input.txt --log vm
 VirtualiseurVM.exe ... --preseed docs\preseed-debian.cfg
 ```
 
-Le canal `\\.\pipe\Virtualiseur-<nom>` accepte `status`, `pause`, `resume`, `acpi-shutdown`, `poweroff`, `reset`, `stats`, `cable on|off` (et `cable` pour lire l'état), `cdrom` (image insérée ou `empty`), `cdrom-insert <chemin.iso>` et `cdrom-eject`.
+Le canal `\\.\pipe\Virtualiseur-<nom>` accepte `status`, `pause`, `resume`, `acpi-shutdown`, `poweroff`, `reset`, `stats`, `cable on|off` (et `cable` pour lire l'état), `cdrom` (image insérée ou `empty`), `cdrom-insert <chemin.iso>`, `cdrom-eject` et `timesync`.
 
 **Changement de disque à chaud** : `IdeController::ChangeCdromMedia` remplace l'image puis signale le changement comme un vrai lecteur : la commande ATAPI suivante échoue en *UNIT ATTENTION* (clé 6, ASC 0x28) et `GET EVENT STATUS NOTIFICATION` rapporte *NewMedia* (2) ou *MediaRemoval* (3). Linux émet alors un uevent `DISK_MEDIA_CHANGE=1` (udisks/GNOME montent le disque). Le changement est conservé au redémarrage de l'invité (`Vm::CurrentConfig`), pas dans `vm.ini`.

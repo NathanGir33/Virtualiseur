@@ -57,7 +57,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>WinHvPlatform.lib;WinHvEmulation.lib;Ws2_32.lib;User32.lib;Gdi32.lib;d2d1.lib;opengl32.lib;windowscodecs.lib;ole32.lib;shell32.lib;comctl32.lib;comdlg32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>WinHvPlatform.lib;WinHvEmulation.lib;Ws2_32.lib;User32.lib;Gdi32.lib;d2d1.lib;opengl32.lib;windowscodecs.lib;ole32.lib;shell32.lib;comctl32.lib;comdlg32.lib;powrprof.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(EnableSlirp)' == 'true'">
@@ -92,6 +92,7 @@
     <ClCompile Include="devices\VirtioSound.cpp" />
     <ClCompile Include="audio\WasapiOutput.cpp" />
     <ClCompile Include="agent\GuestAgent.cpp" />
+    <ClCompile Include="agent\QemuGuestAgent.cpp" />
     <ClCompile Include="ui\ClipboardBridge.cpp" />
     <ClCompile Include="devices\VirtioInput.cpp" />
     <ClCompile Include="firmware\AcpiTables.cpp" />
@@ -126,6 +127,7 @@
     <ClInclude Include="devices\VirtioSound.h" />
     <ClInclude Include="audio\WasapiOutput.h" />
     <ClInclude Include="agent\GuestAgent.h" />
+    <ClInclude Include="agent\QemuGuestAgent.h" />
     <ClInclude Include="ui\ClipboardBridge.h" />
     <ClInclude Include="devices\VirtioInput.h" />
     <ClInclude Include="firmware\AcpiTables.h" />

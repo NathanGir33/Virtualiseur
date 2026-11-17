@@ -4,6 +4,7 @@
 #include "core/GuestMemory.h"
 #include "boot/LinuxLoader.h"
 #include "agent/GuestAgent.h"
+#include "agent/QemuGuestAgent.h"
 #include "devices/VirtioGpu.h"
 #include "devices/VirtioInput.h"
 #include "devices/VirtioSerial.h"
@@ -14,6 +15,7 @@
 #include "WindowsHypervisorBackend.h"
 
 #include <WinHvEmulation.h>
+#include <powrprof.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -137,6 +139,8 @@ public:
     void SetCableConnected(bool connected);
     bool CableConnected() const;
     VmConfig CurrentConfig() const;
+    // Guest clock: checks it now through qemu-guest-agent (when the guest runs it).
+    void SyncGuestTime(const char* reason);
     DisplaySnapshot Display() const;
     // Adds the boot framebuffer rows changed since the previous call.
     void FramebufferDirtyRows(DirtyRows& rows) const
@@ -237,6 +241,9 @@ private:
     VirtioTablet* tablet_ = nullptr;
     VirtioSound* sound_ = nullptr;
     std::unique_ptr<GuestAgent> agent_;
+    std::unique_ptr<QemuGuestAgent> qemuAgent_;
+    DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS powerSubscription_{}; // Host suspend/resume.
+    HPOWERNOTIFY powerNotify_ = nullptr;
     std::unique_ptr<VgaRegisters> vga_;
     std::unique_ptr<PostPort> post_;
     std::unique_ptr<NetworkBackend> network_;

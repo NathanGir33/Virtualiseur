@@ -404,7 +404,8 @@ void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
                 else if (command == "cable on" || command == "cable off") {
                     if (!vm->CanConnectCable()) reply = "no-network";
                     else vm->SetCableConnected(command == "cable on");
-                } else if (command == "cable") reply = vm->CableConnected() ? "on" : "off";
+                } else if (command == "timesync") vm->SyncGuestTime("demande par le tube");
+                else if (command == "cable") reply = vm->CableConnected() ? "on" : "off";
                 else if (command == "cdrom") reply = vm->CdromImage().empty() ? "empty" : PathUtf8(vm->CdromImage());
                 else if (command == "cdrom-eject" || command.rfind("cdrom-insert ", 0) == 0) {
                     try {
