@@ -400,6 +400,40 @@ namespace {
 
 // The 3D client edge of edits and lists is drawn with system (light) colors:
 // in the dark theme it is repainted with the theme's border color.
+// The status bar's size grip keeps the system (light) colors whatever the
+// theme: once the bar is painted, the grip square is painted again with the
+// theme's background and a triangle of dots (the grip still works: the
+// status bar answers WM_NCHITTEST there).
+LRESULT CALLBACK SizeGripProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
+{
+    if (message == WM_PAINT) {
+        const LRESULT result = DefSubclassProc(window, message, wParam, lParam);
+        RECT client{};
+        GetClientRect(window, &client);
+        const int size = client.bottom - client.top;
+        if ((GetWindowLongW(window, GWL_STYLE) & SBARS_SIZEGRIP) != 0 && size > 0) {
+            const HDC dc = GetDC(window);
+            const RECT grip{client.right - size, client.top, client.right, client.bottom};
+            Fill(dc, grip, color::kWindow);
+            const int dot = (std::max)(2, Scale(2));
+            const int step = dot + Scale(2);
+            const int right = client.right - Scale(3);
+            const int bottom = client.bottom - Scale(3);
+            for (int row = 0; row < 3; ++row) {
+                for (int column = 0; column <= row; ++column) {
+                    const int x = right - (column + 1) * step + Scale(2);
+                    const int y = bottom - (2 - row + 1) * step + Scale(2);
+                    Fill(dc, RECT{x, y, x + dot, y + dot}, color::kDisabled);
+                }
+            }
+            ReleaseDC(window, dc);
+        }
+        return result;
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(window, &SizeGripProc, 3);
+    return DefSubclassProc(window, message, wParam, lParam);
+}
+
 LRESULT CALLBACK ClientEdgeProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR, DWORD_PTR)
 {
     if (message == WM_NCPAINT) {
@@ -435,6 +469,7 @@ void ThemeControl(HWND control)
         // Unthemed so that SB_SETBKCOLOR applies; its text is owner-drawn.
         SetWindowTheme(control, L"", L"");
         SendMessageW(control, SB_SETBKCOLOR, 0, static_cast<LPARAM>(color::kWindow));
+        SetWindowSubclass(control, &SizeGripProc, 3, 0);
     }
     if (kind == L"Edit" || kind == L"ListBox") SetWindowSubclass(control, &ClientEdgeProc, 2, 0); // Dark client edge.
     SetWindowPos(control, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
