@@ -15,3 +15,6 @@ manager.ini
 
 # Installateur compilé
 installer/Output/
+
+# Base de compilation pour clangd (tools\gen-compile-commands.ps1)
+build-clangd/
