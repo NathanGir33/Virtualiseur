@@ -7,11 +7,12 @@ Moniteur de machine virtuelle de Virtualiseur. Il crée une partition WHP, y pla
 - **Un thread par vCPU** (`Vm::VcpuThread`) boucle sur `WHvRunVirtualProcessor` et traite les sorties :
   - **E/S port simples** : traitées sur un chemin rapide, avec une seule écriture des registres (RIP, et RAX en lecture).
   - **E/S chaînes (`rep ins/outs`) et MMIO** : déléguées à l'émulateur d'instructions WHP (`WinHvEmulation`).
-  - **EOI APIC** : transmises à l'IOAPIC pour les interruptions en mode niveau.
+  - **EOI APIC** : transmises à l'IOAPIC pour les interruptions en mode niveau (lignes ISA, virtio sans MSI-X).
   - **Triple faute** : provoque un reset de la VM.
 - **APIC local émulé par l'hyperviseur** (mode xAPIC de WHP). Le timer LAPIC, les EOI et les IPI ne provoquent aucune sortie. Les AP sont parqués en *wait-for-SIPI* (`StartupSuspend`) ; le noyau les réveille par INIT/SIPI.
-- **Interruptions** : chaque périphérique pilote une ligne vers l'**IOAPIC** (`devices/IoApic`). Les lignes ISA sont en front montant, les lignes PCI en niveau avec *Remote IRR*. L'IOAPIC livre les messages avec `WHvRequestInterrupt`, qui est thread-safe et réveille le vCPU ciblé. Les PIC 8259 ne sont qu'un modèle de registres : Linux les masque dès que la MADT annonce l'IOAPIC.
-- **Verrou de périphériques** : un `recursive_mutex` unique sérialise l'accès aux modèles de périphériques entre les vCPU, les threads de périphériques (timer PIT, I/O virtio-blk, réseau slirp) et l'interface. Les E/S disque de virtio-blk s'exécutent hors verrou.
+- **Interruptions** : les périphériques hérités pilotent une ligne vers l'**IOAPIC** (`devices/IoApic`), en front pour l'ISA et en niveau avec *Remote IRR* pour le PCI. Les fonctions virtio utilisent **MSI-X** dès que le pilote l'active : un message par file, en front, envoyé directement aux APIC locaux (pas de ligne partagée, pas de lecture de l'ISR, pas de sortie EOI). Tout passe par `WHvRequestInterrupt`, qui est thread-safe et réveille le vCPU ciblé. Les PIC 8259 ne sont qu'un modèle de registres : Linux les masque dès que la MADT annonce l'IOAPIC.
+- **Horloge** : la partition expose les *enlightenments* Hyper-V gérés par WHP (`--hyperv on`, par défaut) : fréquences du TSC et du timer APIC lues dans des MSR (aucun étalonnage contre le PIT, qui échouait souvent), horloge `hyperv_clocksource_tsc_page` sans sortie VM, timers synthétiques en mode direct. Sans eux, l'étalonnage raté faisait passer Linux sur `acpi_pm`, et chaque lecture de l'heure devenait une sortie d'E/S.
+- **Verrous** : chaque fonction virtio a son propre verrou (anneaux, MSI-X, état), pris par les bus pour les accès BAR et par les threads hôtes qui la servent. L'IOAPIC se verrouille seul. Les périphériques hérités (PIT, UART, PS/2, IDE, configuration PCI, ACPI) partagent le verrou de la VM. Ordre : verrou de la VM, puis d'un périphérique, puis de l'IOAPIC ; un thread de périphérique ne prend jamais le verrou de la VM. Le bus d'E/S se lit sans verrou (routes atomiques), le bus MMIO sous `shared_mutex`.
 - **Pause, reprise, reset, arrêt** : les vCPU sont annulés par `WHvCancelRunVirtualProcessor`. En pause, ils attendent une variable de condition, sans consommer de CPU. Un reset reconstruit entièrement la VM ; la fenêtre reste ouverte.
 
 ## Carte mémoire invitée
@@ -21,7 +22,8 @@ Moniteur de machine virtuelle de Virtualiseur. Il crée une partition WHP, y pla
 | `0x0` - `0x9EFFF` | RAM (boot_params, ligne de commande, trampoline SMP) |
 | `0xA0000` - `0xFFFFF` | zone legacy : texte VGA (`0xB8000`), tables ACPI (`0xE0000`) |
 | `0x100000` - min(RAM, 3 Gio) | RAM ; noyau à 16 Mio, initrd en haut |
-| `0xE0000000` | framebuffer linéaire 32 bpp (suivi des pages sales) |
+| `0xE0000000` | framebuffer linéaire 32 bpp (suivi des pages sales, jusqu'à 8 bandes de lignes modifiées) |
+| `0xFE000000` | BAR1 MMIO des fonctions virtio (MSI-X, doorbells), 64 Kio par slot |
 | `0xFEC00000` | IOAPIC (MMIO émulé) |
 | `0xFEE00000` | APIC local (géré par WHP) |
 | ≥ 4 Gio | RAM au-delà de 3 Gio |
@@ -37,19 +39,26 @@ Moniteur de machine virtuelle de Virtualiseur. Il crée une partition WHP, y pla
 | ACPI PM | 0x600-0x60B, SCI GSI 9 | PM1 événement/contrôle, timer PM 32 bits, bouton power, S5 |
 | Bus PCI | 0xCF8-0xCFF | mécanisme #1 ; reset système via 0xCF9 |
 | 00:01.1 PIIX3 IDE | 0x1F0/0x170, IRQ 14/15, BMDMA | disque ATA LBA48 et CD-ROM ATAPI, PIO + DMA multimot |
-| 00:03.0 virtio-net | BAR0 E/S, GSI 11 | MAC configurable (`--mac`) ; NAT, pont, réseau interne, privé hôte (`--net`) ; file d'attente RX |
-| 00:04.0 virtio-blk | BAR0 E/S, GSI 10 | thread d'E/S, flush, GET_ID |
-| 00:05.0 virtio-gpu | BAR0 E/S 0xC300, BAR2 mém. = framebuffer, GSI 16 | virtio 1.0, classe VGA ; 2D, plan curseur, redimensionnement à chaud |
-| 00:06.0 virtio-input | BAR0 E/S 0xC400, GSI 17 | virtio 1.0 ; tablette (ABS_X/Y 0-32767, 5 boutons, molettes) |
-| 00:07.0 virtio-serial | BAR0 E/S 0xC500, GSI 18 | virtio 1.0, multiport ; port 1 `com.redhat.spice.0` pour spice-vdagent |
-| 00:08.0 virtio-sound | BAR0 E/S 0xC600, GSI 19 | virtio 1.0 ; un flux de sortie S16, 1-2 canaux, 8-96 kHz ; `--audio off` le retire |
+| 00:03.0 virtio-net | 1AF4:1041, GSI 11 sans MSI-X | MAC configurable (`--mac`) ; NAT, pont, réseau interne, privé hôte (`--net`) ; file d'attente RX |
+| 00:04.0 virtio-blk | 1AF4:1042, GSI 10 sans MSI-X | thread d'E/S réveillé directement par le doorbell, flush, GET_ID |
+| 00:05.0 virtio-gpu | BAR2 mém. = framebuffer, GSI 16 sans MSI-X | classe VGA ; 2D, plan curseur, redimensionnement à chaud |
+| 00:06.0 virtio-input | GSI 17 sans MSI-X | tablette (ABS_X/Y 0-32767, 5 boutons, molettes) |
+| 00:07.0 virtio-serial | GSI 18 sans MSI-X | multiport ; port 1 `com.redhat.spice.0` pour spice-vdagent |
+| 00:08.0 virtio-sound | GSI 19 sans MSI-X | un flux de sortie S16, 1-2 canaux, 8-96 kHz ; `--audio off` le retire |
 | VGA | 0x3B0-0x3DF | registres du curseur en mode texte |
 
-virtio-net et virtio-blk utilisent le transport virtio-pci *legacy* (`devices/Virtio`). virtio-gpu et virtio-input exigent le transport moderne (`devices/VirtioModern`) : capacités PCI vendeur vers un BAR d'E/S de 256 octets (configuration commune, ISR, notification, configuration du périphérique), et interruptions INTx.
+Toutes les fonctions virtio utilisent le transport moderne virtio 1.0 (`devices/VirtioModern`), avec pour le slot *n* :
 
-virtio-gpu est déclarée en classe VGA, avec un BAR mémoire posé sur le framebuffer de démarrage. Linux retire donc vesafb/simpledrm quand `virtio_gpu` se charge, comme avec une vraie carte. Les commandes sont exécutées sur le vCPU qui notifie. La fenêtre copie sous verrou les lignes signalées par `RESOURCE_FLUSH`, puis les affiche par Direct2D. Le plan curseur devient un `HCURSOR` Windows quand la tablette est active ; sinon il est dessiné par-dessus l'image. Options : `--gpu virgl|virtio|none` et `--pointer ps2`.
+- **BAR0**, 256 octets d'E/S à `0xC000 + n × 0x100` : configuration commune, ISR, notification sans doorbells, configuration du périphérique (capacités PCI vendeur) ;
+- **BAR1**, 16 Kio de MMIO à `0xFE000000 + n × 64 Kio` : table MSI-X (`0x0000`, une entrée par file plus une pour la configuration), bits en attente (`0x0800`), adresses de notification (`0x1000 + 4 × file`).
 
-**3D (virgl)** : `devices/Virgl` charge `libvirglrenderer-1.dll` à côté de l'exécutable. Un thread GPU dédié possède les contextes OpenGL (WGL, profil core, tous partagés avec le premier) et exécute tous les appels virglrenderer, qui n'est pas thread-safe. Le vCPU qui notifie copie chaque requête hors de l'anneau et la poste au thread GPU. Les commandes avec barrière ne sont rendues à l'invité qu'au rappel `write_fence`, que le thread GPU obtient en interrogeant le GPU toutes les 0,5 ms tant qu'une barrière est en vol. L'image affichée est relue (`transfer_read_iov`) seulement sur les rectangles signalés par `RESOURCE_FLUSH`, puis présentée par Direct2D comme en 2D. Après un reset du périphérique, un compteur de génération écarte les commandes encore en file.
+**Notifications** : quand l'hôte les propose, chaque adresse de notification porte un **doorbell WHP** (`WHvCreateNotificationPort`, ou l'ancien `WHvRegisterPartitionDoorbellEvent`, résolus à l'exécution). L'écriture de l'invité signale un événement dans l'hyperviseur : le vCPU repart sans sortie vers le VMM. Un thread par périphérique attend ces événements et traite la file sous le verrou du périphérique. Sinon, la notification passe par le port d'E/S de BAR0, moins coûteux qu'une sortie MMIO émulée. Les doorbells suivent BAR1 si l'invité la déplace. Le journal indique le mode retenu.
+
+**Réception réseau** : les backends livrent une rafale de trames dans l'anneau RX, puis signalent une seule fois (`GuestPort::flush`) : une interruption par passe de libslirp ou par lot de capture, et non par trame.
+
+virtio-gpu est déclarée en classe VGA, avec un BAR mémoire posé sur le framebuffer de démarrage. Linux retire donc vesafb/simpledrm quand `virtio_gpu` se charge, comme avec une vraie carte. Les commandes sont exécutées par le thread de notifications du périphérique (ou le vCPU qui notifie, sans doorbells). La fenêtre copie sous verrou les lignes signalées par `RESOURCE_FLUSH`, puis les affiche par Direct2D. Le plan curseur devient un `HCURSOR` Windows quand la tablette est active ; sinon il est dessiné par-dessus l'image. Options : `--gpu virgl|virtio|none` et `--pointer ps2`.
+
+**3D (virgl)** : `devices/Virgl` charge `libvirglrenderer-1.dll` à côté de l'exécutable. Un thread GPU dédié possède les contextes OpenGL (WGL, profil core, tous partagés avec le premier) et exécute tous les appels virglrenderer, qui n'est pas thread-safe. Le thread qui reçoit la notification copie chaque requête hors de l'anneau et la poste au thread GPU. Les commandes avec barrière ne sont rendues à l'invité qu'au rappel `write_fence`, que le thread GPU obtient en interrogeant le GPU toutes les 0,5 ms tant qu'une barrière est en vol. L'image affichée est relue (`transfer_read_iov`) seulement sur les rectangles signalés par `RESOURCE_FLUSH`, puis présentée par Direct2D comme en 2D. Après un reset du périphérique, un compteur de génération écarte les commandes encore en file.
 
 **Réseau** (`net/`) : virtio-net envoie ses trames à un `NetworkBackend`, choisi par `--net` :
 

@@ -33,8 +33,9 @@ Mesures sur un i5-11300H, VM de 2 vCPU et 2 Gio :
 | Sorties VM pour un démarrage complet du système installé | ~25 000 |
 | CPU hôte, VM au repos à l'invite de connexion | ~0,6 % d'un cœur |
 | CPU hôte, VM en pause | 0 |
-| Disque virtio-blk, lecture séquentielle directe (1 Mio) | ~440 Mo/s |
-| Disque virtio-blk, lecture 4 Kio QD1 | ~4 700 IOPS |
+| Disque virtio-blk, lecture séquentielle directe (1 Mio) | ~600 Mo/s |
+| Disque virtio-blk, lecture 4 Kio QD1 | ~19 000 IOPS (~2 700 sorties VM pour 30 000 requêtes, grâce aux doorbells) |
+| Réseau NAT, flux TCP hôte → invité (redirection de port) | ~50 Mo/s, ~300 sorties VM en 10 s |
 | Disque IDE (DMA), lecture séquentielle directe | ~275 Mo/s |
 | Téléchargement HTTP via le NAT | débit de la connexion hôte (11,3 Mo/s contre 10,1 Mo/s sur l'hôte) |
 
