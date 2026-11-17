@@ -587,6 +587,13 @@ int wmain(int argc, wchar_t** argv)
             VMM_INFO("Statistiques: %s", vm->Statistics().c_str());
             slot.Set(nullptr);
             config = vm->CurrentConfig(); // Keeps the ISO and cable changed while running.
+            // Other threads (window, control pipe) may still hold the VM for
+            // a moment. WHP cannot map the memory of a new partition while
+            // the old one exists, so destroy it here, last, before any restart.
+            for (int waited = 0; vm.use_count() > 1; ++waited) {
+                if (waited == 2000) VMM_WARN("La VM arrêtée est encore utilisée par un autre thread ; attente.");
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
             vm.reset();
             if (reason == VmExit::Reset && !shuttingDown.load()) {
                 VMM_INFO("Redémarrage de la machine virtuelle.");

@@ -188,6 +188,11 @@ Vm::~Vm()
     network_.reset();
     pciFunctions_.clear();
     pit_.reset();
+    // Delete the partition now, while the guest memory it maps still exists.
+    if (partition_) {
+        const HRESULT deleted = partition_->Destroy();
+        if (FAILED(deleted)) VMM_WARN("Suppression de la partition WHP : HRESULT 0x%08lx.", static_cast<unsigned long>(deleted));
+    }
 }
 
 void Vm::BuildDevices()

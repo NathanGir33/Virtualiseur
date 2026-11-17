@@ -232,10 +232,11 @@ void DisplayWindow::ArmFrameTimer()
 void DisplayWindow::OnFrame(bool fromTimerMessage)
 {
     if (closing_) return;
-    const auto vm = slot_.Get();
-    if (vm.get() != lastVm_) {
+    std::uint64_t generation = 0;
+    const auto vm = slot_.Get(generation);
+    if (generation != lastVmGeneration_) {
         // New VM (guest reset): new framebuffer, redraw everything.
-        lastVm_ = vm.get();
+        lastVmGeneration_ = generation;
         if (vm) vm->SetAudioMuted(audioMuted_); // Keep the mute setting across guest resets.
         uploadAll_ = true;
         cursor_ = GpuCursor{};
@@ -247,7 +248,7 @@ void DisplayWindow::OnFrame(bool fromTimerMessage)
         if (fromTimerMessage) InvalidateRect(window_, nullptr, FALSE);
         return;
     }
-    SyncTextureDisplay(*vm);
+    SyncTextureDisplay(*vm, generation);
     if (vm->Display().mode != DisplayMode::Graphics) {
         // Text mode diffs its cell buffer itself; the fallback rate is enough.
         if (fromTimerMessage) InvalidateRect(window_, nullptr, FALSE);
@@ -609,12 +610,12 @@ void DisplayWindow::ReleaseD2D()
     uploadAll_ = true;
 }
 
-void DisplayWindow::SyncTextureDisplay(Vm& vm)
+void DisplayWindow::SyncTextureDisplay(Vm& vm, std::uint64_t generation)
 {
     // The shared texture is only usable while Direct2D draws the window.
     const bool wanted = !d2dUnavailable_;
-    if (textureDisplayVm_ == &vm && textureDisplay_ == wanted) return;
-    textureDisplayVm_ = &vm;
+    if (textureDisplayGeneration_ == generation && textureDisplay_ == wanted) return;
+    textureDisplayGeneration_ = generation;
     textureDisplay_ = wanted;
     vm.SetGpuTextureDisplay(wanted);
 }
@@ -996,9 +997,10 @@ RECT DisplayWindow::FitRect(const RECT& client, std::uint32_t width, std::uint32
 
 void DisplayWindow::Paint()
 {
-    const auto vm = slot_.Get();
-    if (vm && vm.get() != lastVm_) {
-        lastVm_ = vm.get();
+    std::uint64_t generation = 0;
+    const auto vm = slot_.Get(generation);
+    if (vm && generation != lastVmGeneration_) {
+        lastVmGeneration_ = generation;
         vm->SetAudioMuted(audioMuted_);
         uploadAll_ = true;
         cursor_ = GpuCursor{};
@@ -1012,7 +1014,7 @@ void DisplayWindow::Paint()
     }
     const bool graphics = snapshot.mode == DisplayMode::Graphics &&
                           (snapshot.framebuffer != nullptr || snapshot.texture != nullptr);
-    if (vm) SyncTextureDisplay(*vm);
+    if (vm) SyncTextureDisplay(*vm, generation);
     if (graphics) {
         // Direct2D redraws the whole window each frame: nothing to clip.
         if (RenderGraphics(snapshot, rows)) {

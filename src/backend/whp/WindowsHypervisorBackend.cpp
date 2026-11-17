@@ -522,11 +522,16 @@ void* Partition::AllocateAndMapGuestMemory(
 
 void Partition::Close() noexcept
 {
+    (void)Destroy();
+}
+
+HRESULT Partition::Destroy() noexcept
+{
     if (handle_ == nullptr) {
-        return;
+        return S_OK;
     }
 
-    (void)WHvDeletePartition(handle_);
+    const HRESULT result = WHvDeletePartition(handle_);
     handle_ = nullptr;
 
     for (const auto& mapping : memoryMappings_) {
@@ -534,6 +539,7 @@ void Partition::Close() noexcept
     }
     memoryMappings_.clear();
     createdProcessors_.clear();
+    return result;
 }
 
 } // namespace virtualiseur::whp

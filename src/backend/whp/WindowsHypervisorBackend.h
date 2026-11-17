@@ -65,6 +65,9 @@ public:
     std::uint32_t GetLocalApicRegister(
         std::uint32_t virtualProcessorIndex, std::uint32_t registerOffset) const;
     bool CancelRunVirtualProcessor(std::uint32_t virtualProcessorIndex) noexcept;
+    // Deletes the partition now (the destructor does it otherwise); returns
+    // the WHvDeletePartition result.
+    HRESULT Destroy() noexcept;
     // Doorbell: a guest write to `guestPhysicalAddress` (an unmapped GPA)
     // signals `event` inside the hypervisor, without a VM exit to the VMM.
     // Returns nullptr when this host lacks doorbells or refuses the address.

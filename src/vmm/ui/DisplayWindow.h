@@ -24,16 +24,26 @@ public:
     {
         const std::lock_guard lock(mutex_);
         vm_ = std::move(vm);
+        ++generation_;
     }
     std::shared_ptr<Vm> Get() const
     {
         const std::lock_guard lock(mutex_);
         return vm_;
     }
+    // Also returns which VM this is: a restarted VM may reuse the address of
+    // the previous one, its generation always differs.
+    std::shared_ptr<Vm> Get(std::uint64_t& generation) const
+    {
+        const std::lock_guard lock(mutex_);
+        generation = generation_;
+        return vm_;
+    }
 
 private:
     mutable std::mutex mutex_;
     std::shared_ptr<Vm> vm_;
+    std::uint64_t generation_ = 0;
 };
 
 // Host window showing the guest screen. Rendering never erases the client
@@ -98,7 +108,7 @@ private:
     bool CreateTargetBitmap();
     void ResizeSwapChain(UINT width, UINT height);
     // Tells the VM whether the screen is drawn from the shared GPU texture.
-    void SyncTextureDisplay(Vm& vm);
+    void SyncTextureDisplay(Vm& vm, std::uint64_t generation);
     void PaintGraphics(HDC dc, const RECT& client, const DisplaySnapshot& snapshot);
     void PaintText(HDC dc, const RECT& client, const DisplaySnapshot& snapshot);
     RECT FitRect(const RECT& client, std::uint32_t width, std::uint32_t height) const;
@@ -149,7 +159,7 @@ private:
     std::set<std::uint16_t> pressedKeys_;
     ULONGLONG lockSyncHoldUntil_ = 0;
     std::wstring lastTitle_;
-    const Vm* lastVm_ = nullptr;
+    std::uint64_t lastVmGeneration_ = ~0ull;
     RECT paintRect_{};
     std::unique_ptr<ClipboardBridge> clipboard_; // Shared clipboard and file drops (guest agent).
 
@@ -170,7 +180,7 @@ private:
     Microsoft::WRL::ComPtr<ID2D1Bitmap> d2dBitmap_;      // Upload of CPU framebuffers.
     Microsoft::WRL::ComPtr<ID2D1Bitmap1> sharedBitmap_;  // The shared virgl texture.
     std::uint64_t sharedGeneration_ = ~0ull;
-    const Vm* textureDisplayVm_ = nullptr; // VM last told about texture display...
+    std::uint64_t textureDisplayGeneration_ = ~0ull; // VM last told about texture display...
     bool textureDisplay_ = false;          // ...and what it was told.
     std::uint32_t bitmapWidth_ = 0;
     std::uint32_t bitmapHeight_ = 0;
