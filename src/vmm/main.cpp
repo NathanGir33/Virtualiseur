@@ -69,6 +69,12 @@ void PrintUsage()
         "  --preseed <fichier>       Installation Debian automatique (fichier preseed)\n"
         "  --guest-tools on|off      Installer Debian : ajoute spice-vdagent (presse-papiers, fichiers)\n"
         "                            quand un bureau est installé (défaut on)\n"
+        "  --firmware linux|uefi     Démarrage Linux direct par le VMM (défaut) ou firmware UEFI (OVMF) qui\n"
+        "                            démarre le chargeur du disque ou de l'ISO (GRUB, systemd-boot...)\n"
+        "  --uefi-code <fichier.fd>  Code du firmware (défaut : firmware\\OVMF_CODE_4M.fd à côté du VMM)\n"
+        "  --uefi-vars <fichier.fd>  Variables UEFI de la VM (défaut : vars.fd à côté du disque, créé\n"
+        "                            depuis OVMF_VARS_4M.fd)\n"
+        "  --uefi-debug              Journal de débogage d'OVMF (port 0x402) dans le journal du VMM\n"
         "  --rtc utc|local           Horloge matérielle en UTC (Linux, défaut) ou heure locale (Windows)\n"
         "  --serial-log <fichier>    Copie la console série (ttyS0) dans un fichier\n"
         "  --serial-input <fichier>  Envoie le contenu d'un fichier (suivi en continu) sur ttyS0\n"
@@ -249,7 +255,15 @@ Options ParseOptions(const std::vector<std::string>& args)
             if (value == "on") options.vm.hyperv = true;
             else if (value == "off") options.vm.hyperv = false;
             else throw std::invalid_argument("--hyperv attend on ou off.");
-        } else if (option == "--snapshot") {
+        } else if (option == "--firmware") {
+            const auto& value = next();
+            if (value == "uefi") options.vm.firmware = Firmware::Uefi;
+            else if (value == "linux") options.vm.firmware = Firmware::LinuxDirect;
+            else throw std::invalid_argument("--firmware attend uefi ou linux.");
+        } else if (option == "--uefi-code") options.vm.uefiCode = Utf8Path(next());
+        else if (option == "--uefi-vars") options.vm.uefiVars = Utf8Path(next());
+        else if (option == "--uefi-debug") options.vm.uefiDebug = true;
+        else if (option == "--snapshot") {
             const auto action = next();
             options.snapshot = {action};
             if (action == "take" || action == "restore" || action == "delete") options.snapshot.push_back(next());

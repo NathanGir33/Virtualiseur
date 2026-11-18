@@ -38,6 +38,9 @@ $entries = @(
     @{ Dll = 'libwinpthread-1.dll'; Name = 'winpthreads (MinGW-w64)'; Version = ''; License = 'MIT et BSD'
        Source = 'https://www.mingw-w64.org'
        Files = @("$Msys\share\licenses\libwinpthread\COPYING") },
+    @{ Dll = 'firmware\OVMF_CODE_4M.fd'; Name = 'OVMF (EDK2, paquet Debian ovmf)'; Version = '2025.02-8+deb13u1'; License = 'BSD-2-Clause-Patent (et licences listées)'
+       Source = 'https://github.com/tianocore/edk2 ; paquet https://deb.debian.org/debian/pool/main/e/edk2/'
+       Files = @("$Dist\firmware\OVMF-copyright.txt") },
     @{ Dll = 'libgcc_s_seh-1.dll'; Name = 'Bibliothèque d''exécution de GCC (libgcc)'; Version = ''; License = 'GPL-3.0 avec l''exception GCC Runtime Library'
        Source = 'https://gcc.gnu.org'
        Files = @("$Msys\share\licenses\libgcc\COPYING.RUNTIME", "$Msys\share\licenses\libgcc\COPYING3") }

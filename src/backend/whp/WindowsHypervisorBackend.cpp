@@ -91,7 +91,8 @@ HostCapabilities QueryHostCapabilities() noexcept
     return result;
 }
 
-Partition::Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic, bool hypervEnlightenments)
+Partition::Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic, bool hypervEnlightenments,
+                     bool unhandledMsrExits)
 {
     if (virtualProcessorCount == 0) {
         throw std::invalid_argument("A WHP partition must have at least one vCPU.");
@@ -140,6 +141,22 @@ Partition::Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic, 
             }
         }
         if (hypervEnlightenments) EnableEnlightenments();
+        if (unhandledMsrExits) {
+            // Only the MSRs WHP does not implement: with X64MsrExit alone,
+            // every MSR access would exit.
+            WHV_EXTENDED_VM_EXITS exits{};
+            exits.X64MsrExit = 1;
+            if (SUCCEEDED(WHvSetPartitionProperty(handle_, WHvPartitionPropertyCodeExtendedVmExits, &exits, sizeof(exits)))) {
+                WHV_X64_MSR_EXIT_BITMAP bitmap{};
+                bitmap.UnhandledMsrs = 1;
+                msrExits_ = SUCCEEDED(WHvSetPartitionProperty(handle_, WHvPartitionPropertyCodeX64MsrExitBitmap, &bitmap,
+                                                              sizeof(bitmap)));
+                if (!msrExits_) {
+                    exits.X64MsrExit = 0;
+                    (void)WHvSetPartitionProperty(handle_, WHvPartitionPropertyCodeExtendedVmExits, &exits, sizeof(exits));
+                }
+            }
+        }
         CheckHRESULT("WHvSetupPartition", WHvSetupPartition(handle_));
 
         createdProcessors_.reserve(virtualProcessorCount);
@@ -518,6 +535,21 @@ void* Partition::AllocateAndMapGuestMemory(
         throw;
     }
     return hostAddress;
+}
+
+void Partition::MapDeviceMemory(void* hostAddress, std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes,
+                                WHV_MAP_GPA_RANGE_FLAGS flags)
+{
+    if (handle_ == nullptr) throw std::logic_error("Cannot map memory into a closed WHP partition.");
+    CheckHRESULT("WHvMapGpaRange(device)",
+                 WHvMapGpaRange(handle_, hostAddress, guestPhysicalAddress, static_cast<UINT64>(sizeInBytes), flags));
+}
+
+void Partition::UnmapDeviceMemory(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes)
+{
+    if (handle_ == nullptr) return;
+    CheckHRESULT("WHvUnmapGpaRange(device)",
+                 WHvUnmapGpaRange(handle_, guestPhysicalAddress, static_cast<UINT64>(sizeInBytes)));
 }
 
 void Partition::Close() noexcept

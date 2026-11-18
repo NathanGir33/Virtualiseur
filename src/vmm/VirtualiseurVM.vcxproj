@@ -100,6 +100,9 @@
     <ClCompile Include="ui\ClipboardBridge.cpp" />
     <ClCompile Include="devices\VirtioInput.cpp" />
     <ClCompile Include="firmware\AcpiTables.cpp" />
+    <ClCompile Include="firmware\FwCfg.cpp" />
+    <ClCompile Include="firmware\Pflash.cpp" />
+    <ClCompile Include="firmware\UefiBoot.cpp" />
     <ClCompile Include="boot\LinuxLoader.cpp" />
     <ClCompile Include="boot\BootSources.cpp" />
     <ClCompile Include="net\SlirpNetworkBackend.cpp" />
@@ -135,6 +138,9 @@
     <ClInclude Include="ui\ClipboardBridge.h" />
     <ClInclude Include="devices\VirtioInput.h" />
     <ClInclude Include="firmware\AcpiTables.h" />
+    <ClInclude Include="firmware\FwCfg.h" />
+    <ClInclude Include="firmware\Pflash.h" />
+    <ClInclude Include="firmware\UefiBoot.h" />
     <ClInclude Include="boot\LinuxLoader.h" />
     <ClInclude Include="boot\BootSources.h" />
     <ClInclude Include="net\SlirpNetworkBackend.h" />

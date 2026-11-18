@@ -26,9 +26,12 @@ VirtioModernDevice::VirtioModernDevice(std::uint16_t virtioType, std::uint8_t cl
     AttachIoBus(&placement.ioBus);
     AttachMmioBus(&placement.mmioBus);
     SetBarLock(&lock_);
-    // Subsystem = virtio device type, as the virtio spec suggests. QEMU's
-    // 1AF4:1100 makes the guest's PCI database name every device "(QEMU)".
-    SetSubsystem(0x1AF4, virtioType);
+    // Subsystem 0x40 + virtio device type. Virtio 1.0 asks non-transitional
+    // devices for a subsystem ID of 0x40 or more, and EDK2's Virtio10Dxe
+    // (OVMF) ignores the device otherwise; Linux does not check it. Not
+    // QEMU's 1AF4:1100, which makes the guest's PCI database name every
+    // device "(QEMU)".
+    SetSubsystem(0x1AF4, static_cast<std::uint16_t>(0x40 + virtioType));
     SetInterrupt(static_cast<std::uint8_t>(placement.gsi), 1);
     config_[0x04] |= 0x04; // Bus master, as left by the firmware.
     SetIoBar(0, placement.ioBase, 256, this);

@@ -158,7 +158,7 @@ std::uint32_t IdeController::IoRead(std::uint16_t port, std::uint8_t size)
     if (port >= 0x170 && port <= 0x177) return ChannelRead(channels_[1], port - 0x170, size);
     if (port == 0x3F6 || port == 0x376) {
         auto& channel = channels_[port == 0x3F6 ? 0 : 1];
-        if (channel.kind == Kind::None) return 0xFF;
+        if (channel.kind == Kind::None) return EmptyChannelValue(1);
         if ((channel.select & 0x10) != 0) return 0x00;
         return channel.status;
     }
@@ -228,7 +228,7 @@ void IdeController::BusMasterWrite(std::uint32_t offset, std::uint8_t value)
 
 std::uint32_t IdeController::ChannelRead(Channel& channel, std::uint32_t reg, std::uint8_t size)
 {
-    if (channel.kind == Kind::None) return size == 4 ? 0xFFFFFFFFu : (size == 2 ? 0xFFFFu : 0xFFu);
+    if (channel.kind == Kind::None) return EmptyChannelValue(size);
     const bool slave = (channel.select & 0x10) != 0;
     const bool hob = (channel.control & 0x80) != 0;
     switch (reg) {

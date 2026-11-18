@@ -137,6 +137,7 @@ void QemuGuestAgent::OnBytes(std::span<const std::uint8_t> data)
 void QemuGuestAgent::OnOpen(bool open)
 {
     open_ = open;
+    answering_ = false; // Until it answers guest-sync.
     partial_.clear();
     {
         const std::lock_guard guard(mutex_);
@@ -212,7 +213,10 @@ bool QemuGuestAgent::Synchronize()
         if (stopping_ || !open_) return false;
         const auto reply = std::move(replies_.front());
         replies_.pop_front();
-        if (ReturnInteger(reply) == id) return true; // Anything else is stale or a parse error of the 0xFF.
+        if (ReturnInteger(reply) == id) {
+            answering_ = true; // A real agent: firmware drivers open the port but never answer.
+            return true;
+        } // Anything else is stale or a parse error of the 0xFF.
     }
 }
 

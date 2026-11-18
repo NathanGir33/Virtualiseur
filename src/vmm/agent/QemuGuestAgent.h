@@ -47,6 +47,9 @@ public:
 
     // Any thread.
     bool Connected() const noexcept { return open_.load(); }
+    // The agent answered guest-sync since its port opened (OVMF's
+    // VirtioSerialDxe opens the port but is no agent).
+    bool Answering() const noexcept { return answering_.load(); }
     // While suspended (VM paused) the guest cannot answer: no command is sent.
     void SetSuspended(bool suspended);
     // Checks the guest clock soon; `reason` goes to the log.
@@ -85,6 +88,7 @@ private:
     VirtioSerial* serial_ = nullptr;
     std::string partial_;        // Incomplete reply line (device lock).
     std::atomic_bool open_ = false;
+    std::atomic_bool answering_ = false;
 
     // One command exchange at a time (worker checks, freeze, thaw).
     std::mutex exchangeMutex_;

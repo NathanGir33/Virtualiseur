@@ -15,6 +15,9 @@
 #include "core/Thumbnail.h"
 #include "DiskSnapshots.h"
 #include "firmware/AcpiTables.h"
+#include "firmware/FwCfg.h"
+#include "firmware/Pflash.h"
+#include "firmware/UefiBoot.h"
 #include "net/BridgeNetworkBackend.h"
 #include "net/InternalNetworkBackend.h"
 #include "net/SlirpNetworkBackend.h"
@@ -115,7 +118,11 @@ Vm::Vm(const VmConfig& config, SerialOutput serialOutput)
                                  "« Plateforme de l'hyperviseur Windows » puis redémarre Windows.");
     }
 
-    partition_ = std::make_unique<virtualiseur::whp::Partition>(config_.cpus, true, config_.hyperv);
+    const bool uefi = config_.firmware == Firmware::Uefi;
+    partition_ = std::make_unique<virtualiseur::whp::Partition>(config_.cpus, true, config_.hyperv, uefi);
+    if (uefi && !partition_->MsrExitsEnabled()) {
+        VMM_WARN("Firmware UEFI : sorties sur MSR inconnus indisponibles (les accès donneront #GP dans l'invité).");
+    }
     if (config_.hyperv) {
         const auto features = partition_->SyntheticFeatures();
         if (features.AsUINT64 == 0) {
@@ -147,6 +154,10 @@ Vm::Vm(const VmConfig& config, SerialOutput serialOutput)
     if (config_.display == DisplayMode::Graphics) {
         config_.width = std::clamp<std::uint32_t>(config_.width, 640, 3840) & ~7u;
         config_.height = std::clamp<std::uint32_t>(config_.height, 480, 2160);
+    }
+    // UEFI: no boot framebuffer (the screen is virtio-gpu, through OVMF's
+    // GOP driver), so the PCI window OVMF assigns BARs in stays free.
+    if (config_.display == DisplayMode::Graphics && !uefi) {
         FramebufferInfo info;
         info.base = layout::kFramebufferBase;
         info.width = config_.width;
@@ -271,6 +282,14 @@ void Vm::BuildDevices()
     // The CD-ROM drive is always there, empty or not, so a disc can be
     // inserted while the VM runs.
     ide_->AttachCdrom(1, iso_.get());
+    if (config_.firmware == Firmware::Uefi) ide_->SetEmptyChannelReadsZero(true);
+
+    if (config_.firmware == Firmware::Uefi) {
+        // OVMF reaches the ACPI PM timer through the PIIX4 PM function.
+        auto pm = std::make_unique<Piix4PowerManagement>();
+        pciBus_->Add(1, 3, pm.get());
+        pciFunctions_.push_back(std::move(pm));
+    }
 
     const auto placement = [this, sink](std::uint8_t slot, std::uint32_t gsi) {
         return VirtioPlacement{ioBus_, mmioBus_, *sink, static_cast<std::uint16_t>(0xC000 + slot * 0x100),
@@ -328,10 +347,13 @@ void Vm::BuildDevices()
         pciFunctions_.push_back(std::move(blk));
     }
 
-    if (config_.display == DisplayMode::Graphics && config_.virtioGpu && framebuffer_) {
-        auto gpu = std::make_unique<VirtioGpu>(*memory_, placement(kVirtioGpuSlot, kVirtioGpuGsi),
-                                               framebuffer_->width, framebuffer_->height,
-                                               framebuffer_->base, memory_->FramebufferBytes(), config_.gpu3d);
+    // UEFI: no boot framebuffer behind BAR 2; OVMF's VirtioGpuDxe (GOP) and
+    // then Linux drive the card from the first frame.
+    const bool uefi = config_.firmware == Firmware::Uefi;
+    if (config_.display == DisplayMode::Graphics && config_.virtioGpu && (framebuffer_ || uefi)) {
+        auto gpu = std::make_unique<VirtioGpu>(*memory_, placement(kVirtioGpuSlot, kVirtioGpuGsi), config_.width,
+                                               config_.height, framebuffer_ ? framebuffer_->base : 0,
+                                               framebuffer_ ? memory_->FramebufferBytes() : 0, config_.gpu3d);
         virtioGpu_ = gpu.get();
         virtioGpu_->SetShareAllowed(config_.gpuShare);
         pciBus_->Add(kVirtioGpuSlot, 0, gpu.get());
@@ -419,12 +441,77 @@ void Vm::BuildDevices()
     acpi.pciRoutes.insert(acpi.pciRoutes.end(), shareRoutes.begin(), shareRoutes.end());
     // qemu-guest-agent mounts them in the guest on /mnt/<tag> when it connects.
     if (qemuAgent_) qemuAgent_->SetShares(std::move(shareTags));
+    if (config_.firmware == Firmware::Uefi) {
+        // ACPI tables reach OVMF through fw_cfg "etc/table-loader" (B2);
+        // until then OVMF installs its own built-in tables.
+        SetupFirmware();
+        return;
+    }
     const auto rsdp = BuildAcpiTables(*memory_, acpi);
     (void)rsdp;
 }
 
+void Vm::SetupFirmware()
+{
+    const auto vmmDirectory = [] {
+        std::wstring path(32768, L'\0');
+        path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
+        return std::filesystem::path(path).parent_path();
+    }();
+    if (config_.uefiCode.empty()) config_.uefiCode = vmmDirectory / L"firmware" / L"OVMF_CODE_4M.fd";
+    if (config_.uefiVars.empty()) {
+        const auto folder = config_.disk.empty() ? std::filesystem::current_path() : config_.disk.parent_path();
+        config_.uefiVars = folder / L"vars.fd";
+    }
+    if (!std::filesystem::exists(config_.uefiVars)) {
+        // First UEFI start: a fresh variable store from the template.
+        const auto model = config_.uefiCode.parent_path() / L"OVMF_VARS_4M.fd";
+        std::error_code error;
+        if (!std::filesystem::copy_file(model, config_.uefiVars, error)) {
+            throw std::runtime_error("Firmware UEFI : création de " + PathUtf8(config_.uefiVars) + " depuis " + PathUtf8(model) +
+                                     " impossible (" + error.message() + ").");
+        }
+        VMM_INFO("Firmware UEFI : magasin de variables neuf %s.", PathUtf8(config_.uefiVars).c_str());
+    }
+
+    flash_ = std::make_unique<FirmwareFlash>(*partition_, config_.uefiCode, config_.uefiVars);
+    mmioBus_.Register(flash_->Base(), flash_->Size(), flash_.get(), &flash_->Lock());
+
+    auto uuid = config_.uuid;
+    if (std::all_of(uuid.begin(), uuid.end(), [](std::uint8_t value) { return value == 0; })) {
+        // Stable per VM name (FNV-1a), version 4 / variant 1 bits set.
+        std::uint64_t hash = 0xcbf29ce484222325ull;
+        for (int round = 0; round < 2; ++round) {
+            for (const char character : config_.name) hash = (hash ^ static_cast<std::uint8_t>(character)) * 0x100000001b3ull;
+            for (int byte = 0; byte < 8; ++byte) uuid[static_cast<std::size_t>(round * 8 + byte)] = static_cast<std::uint8_t>(hash >> (byte * 8));
+        }
+        uuid[6] = static_cast<std::uint8_t>((uuid[6] & 0x0F) | 0x40);
+        uuid[8] = static_cast<std::uint8_t>((uuid[8] & 0x3F) | 0x80);
+    }
+    fwCfg_ = std::make_unique<FwCfg>(*memory_);
+    ConfigureFwCfg(*fwCfg_, *memory_, config_.cpus, uuid);
+    ioBus_.Register(FwCfg::kSelectorPort, 2, fwCfg_.get());
+    ioBus_.Register(FwCfg::kDmaPort, 8, fwCfg_.get());
+    if (config_.uefiDebug) {
+        debugPort_ = std::make_unique<FirmwareDebugPort>();
+        ioBus_.Register(FirmwareDebugPort::kPort, 1, debugPort_.get());
+        VMM_INFO("Firmware UEFI : journal de débogage d'OVMF activé (port 0x402).");
+    }
+}
+
 void Vm::LoadBootImage()
 {
+    if (config_.firmware == Firmware::Uefi) {
+        // The firmware starts at its reset vector and boots what it finds.
+        if (!config_.preseed.empty() || !config_.kernel.empty()) {
+            VMM_WARN("Firmware UEFI : preseed et noyau direct ne s'appliquent qu'au démarrage Linux direct (ignorés).");
+        }
+        SetupFirmwareResetCpu(*partition_, 0);
+        for (std::uint32_t index = 1; index < config_.cpus; ++index) ParkApplicationProcessor(*partition_, index);
+        bootDescription_ = "firmware UEFI (OVMF)";
+        VMM_INFO("Démarrage: %s, vecteur de reset 0xFFFFFFF0.", bootDescription_.c_str());
+        return;
+    }
     std::optional<BootSelection> selection;
     const bool kernelGiven = !config_.kernel.empty();
     auto boot = config_.boot;
@@ -776,9 +863,9 @@ void Vm::SyncGuestTime(const char* reason)
 Vm::GuestAgentsState Vm::GuestAgents() const noexcept
 {
     GuestAgentsState state;
-    state.qemu = qemuAgent_ && qemuAgent_->Connected();
+    state.qemu = qemuAgent_ && qemuAgent_->Answering();
     state.spicePort = agent_ != nullptr;
-    state.spice = agent_ && agent_->Connected();
+    state.spice = agent_ && agent_->Ready();
     return state;
 }
 
@@ -930,6 +1017,18 @@ std::string Vm::Statistics() const
         else text << " agent_qemu=" << (qemuAgent_->Connected() ? "connecte" : "absent");
     }
     for (const auto* share : shares_) text << " 9p_" << share->Tag() << "=" << share->Requests();
+    // The five busiest I/O ports since the start (diagnostic of polling loops).
+    std::vector<std::pair<std::uint32_t, std::uint16_t>> ports;
+    for (std::uint32_t port = 0; port < 65536; ++port) {
+        if (const auto count = portCounts_[port].load(std::memory_order_relaxed); count != 0) {
+            ports.emplace_back(count, static_cast<std::uint16_t>(port));
+        }
+    }
+    std::sort(ports.begin(), ports.end(), std::greater<>());
+    if (!ports.empty()) text << " ports=";
+    for (std::size_t index = 0; index < ports.size() && index < 5; ++index) {
+        text << (index == 0 ? "" : ",") << std::hex << "0x" << ports[index].second << std::dec << ":" << ports[index].first;
+    }
     return text.str();
 }
 
@@ -939,6 +1038,7 @@ std::string Vm::Statistics() const
 // the disk does not wait for another one talking to the network card.
 std::uint32_t Vm::PortRead(std::uint16_t port, std::uint8_t size)
 {
+    portCounts_[port].fetch_add(1, std::memory_order_relaxed);
     if (const auto* route = ioBus_.Find(port)) {
         const DeviceGuard guard(route->lock != nullptr ? *route->lock : deviceLock_);
         return route->device->IoRead(port, size);
@@ -949,6 +1049,7 @@ std::uint32_t Vm::PortRead(std::uint16_t port, std::uint8_t size)
 
 void Vm::PortWrite(std::uint16_t port, std::uint8_t size, std::uint32_t value)
 {
+    portCounts_[port].fetch_add(1, std::memory_order_relaxed);
     if (const auto* route = ioBus_.Find(port)) {
         const DeviceGuard guard(route->lock != nullptr ? *route->lock : deviceLock_);
         route->device->IoWrite(port, size, value);
@@ -1074,6 +1175,9 @@ void Vm::VcpuThread(std::uint32_t index)
             case WHvRunVpExitReasonX64Halt:
                 HandleHaltExit(index);
                 break;
+            case WHvRunVpExitReasonX64MsrAccess:
+                HandleMsrExit(index, exit);
+                break;
             case WHvRunVpExitReasonUnrecoverableException:
                 VMM_WARN("vCPU %u: triple faute à RIP=0x%llx, redémarrage de la VM.", index,
                          static_cast<unsigned long long>(exit.VpContext.Rip));
@@ -1139,6 +1243,29 @@ void Vm::HandleMmioExit(VcpuContext& context, const WHV_RUN_VP_EXIT_CONTEXT& exi
                   static_cast<unsigned long long>(exit.MemoryAccess.Gva),
                   static_cast<unsigned long long>(exit.VpContext.Rip), status.AsUINT32);
         RequestStop(VmExit::Error);
+    }
+}
+
+// UEFI only (unhandled-MSR exits): an MSR that WHP does not implement reads
+// as 0 and ignores writes instead of faulting; each one is logged once.
+void Vm::HandleMsrExit(std::uint32_t index, const WHV_RUN_VP_EXIT_CONTEXT& exit)
+{
+    const auto& msr = exit.MsrAccess;
+    const bool write = msr.AccessInfo.IsWrite != 0;
+    {
+        const std::lock_guard guard(msrReportMutex_);
+        if (std::find(msrReported_.begin(), msrReported_.end(), msr.MsrNumber) == msrReported_.end()) {
+            msrReported_.push_back(msr.MsrNumber);
+            VMM_INFO("MSR 0x%x non géré par WHP : %s ignorée (vCPU %u).", msr.MsrNumber,
+                     write ? "écriture" : "lecture lue 0", index);
+        }
+    }
+    std::array<WHV_REGISTER_NAME, 3> names{WHvX64RegisterRip, WHvX64RegisterRax, WHvX64RegisterRdx};
+    std::array<WHV_REGISTER_VALUE, 3> values{};
+    values[0].Reg64 = exit.VpContext.Rip + exit.VpContext.InstructionLength;
+    const UINT32 count = write ? 1 : 3; // A read returns EDX:EAX = 0.
+    if (FAILED(WHvSetVirtualProcessorRegisters(partition_->Handle(), index, names.data(), count, values.data()))) {
+        throw std::runtime_error("WHvSetVirtualProcessorRegisters a échoué après un accès MSR.");
     }
 }
 

@@ -66,6 +66,8 @@ private:
         MmioDevice* mmio = nullptr;
     };
     void RemapBars();
+    // The BAR holds the sizing pattern (all writable address bits set).
+    bool BarSizing(std::uint32_t index) const noexcept;
     std::uint32_t BarAddress(std::uint32_t index) const noexcept;
 
     std::array<Bar, 6> bars_{};

@@ -1,5 +1,7 @@
 #include "Pci.h"
 
+#include "../core/Log.h"
+
 namespace vmm {
 
 PciFunction::PciFunction(std::uint16_t vendor, std::uint16_t device, std::uint8_t classCode,
@@ -108,36 +110,60 @@ std::uint32_t PciFunction::BarAddress(std::uint32_t index) const noexcept
            (static_cast<std::uint32_t>(config_[offset + 2]) << 16) | (static_cast<std::uint32_t>(config_[offset + 3]) << 24);
 }
 
+bool PciFunction::BarSizing(std::uint32_t index) const noexcept
+{
+    const auto offset = 0x10 + index * 4;
+    std::uint32_t mask = 0;
+    for (std::uint32_t byte = 0; byte < 4; ++byte) mask |= static_cast<std::uint32_t>(writeMask_[offset + byte]) << (byte * 8);
+    return mask != 0 && (BarAddress(index) & mask) == mask;
+}
+
+// Firmware (OVMF's PCI enumeration) writes all ones to a BAR to read its
+// size back, usually with decoding disabled, then writes the final address.
+// A sizing value never maps anything nor touches the WHP doorbells: the BAR
+// stays where it was. A new address is mapped only while the matching
+// decoding bit of the Command register is set; without it the BAR stops
+// decoding and is mapped nowhere. Nothing is ever mapped from 0xFEC00000 up
+// (I/O APIC, local APIC, firmware flash at 0xFFC00000).
 void PciFunction::RemapBars()
 {
     const bool ioEnabled = (config_[0x04] & 0x01) != 0;
     const bool memoryEnabled = (config_[0x04] & 0x02) != 0;
     for (std::uint32_t index = 0; index < bars_.size(); ++index) {
         auto& bar = bars_[index];
+        if ((bar.io != nullptr || bar.mmio != nullptr) && BarSizing(index)) {
+            // Disabling decoding still unmaps (the device stops answering).
+            const bool enabled = bar.io != nullptr ? ioEnabled : memoryEnabled;
+            if (enabled) continue;
+        }
         if (bar.io != nullptr && ioBus_ != nullptr) {
             const auto address = BarAddress(index) & 0xFFFFFFFCu;
             const bool shouldMap = ioEnabled && address != 0 && address <= 0x10000u - bar.size;
             if (bar.mapped && (!shouldMap || bar.mappedBase != address)) {
                 ioBus_->Unregister(static_cast<std::uint16_t>(bar.mappedBase), bar.size, bar.io);
+                VMM_DEBUG("PCI %04x:%04x BAR%u (E/S) retiré de 0x%04x.", config_[0] | (config_[1] << 8), config_[2] | (config_[3] << 8), index, bar.mappedBase);
                 bar.mapped = false;
             }
             if (shouldMap && !bar.mapped) {
                 ioBus_->Register(static_cast<std::uint16_t>(address), bar.size, bar.io, barLock_);
+                VMM_DEBUG("PCI %04x:%04x BAR%u (E/S) projeté à 0x%04x.", config_[0] | (config_[1] << 8), config_[2] | (config_[3] << 8), index, address);
                 bar.mappedBase = address;
                 bar.mapped = true;
             }
         } else if (bar.mmio != nullptr && mmioBus_ != nullptr) {
             const auto address = BarAddress(index) & 0xFFFFFFF0u;
-            // Sizing writes all ones: such a BAR wraps past 4 GiB and stays unmapped.
+            // Never from the I/O APIC up (local APIC, firmware flash at 0xFFC00000).
             const bool shouldMap = memoryEnabled && address != 0 &&
                                    static_cast<std::uint64_t>(address) + bar.size <= 0xFEC00000ull;
             if (bar.mapped && (!shouldMap || bar.mappedBase != address)) {
                 mmioBus_->Unregister(bar.mappedBase, bar.mmio);
+                VMM_DEBUG("PCI %04x:%04x BAR%u retiré de 0x%08x.", config_[0] | (config_[1] << 8), config_[2] | (config_[3] << 8), index, bar.mappedBase);
                 bar.mapped = false;
                 MmioBarChanged(index, 0, false);
             }
             if (shouldMap && !bar.mapped) {
                 mmioBus_->Register(address, bar.size, bar.mmio, barLock_);
+                VMM_DEBUG("PCI %04x:%04x BAR%u projeté à 0x%08x (%u octets).", config_[0] | (config_[1] << 8), config_[2] | (config_[3] << 8), index, address, bar.size);
                 bar.mappedBase = address;
                 bar.mapped = true;
                 MmioBarChanged(index, address, true);

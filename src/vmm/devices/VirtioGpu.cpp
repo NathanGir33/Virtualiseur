@@ -88,7 +88,11 @@ void SwapRedBlue(std::uint8_t* pixels, std::size_t count)
 VirtioGpu::VirtioGpu(const GuestMemory& memory, const VirtioPlacement& placement,
                      std::uint32_t width, std::uint32_t height,
                      std::uint64_t framebufferBase, std::uint64_t framebufferBytes, bool enable3d)
-    : VirtioModernDevice(16, 0x03, 0x00, memory, placement, 2),
+    // With a linear framebuffer (BAR 2, Linux direct boot) the card is a VGA
+    // controller (03/00); without one (UEFI) it is "other display" (03/80),
+    // like QEMU's virtio-gpu-pci: EDK2's Virtio10Dxe leaves a VGA-class
+    // 1AF4:1050 to QemuVideoDxe (virtio-vga), and VirtioGpuDxe never sees it.
+    : VirtioModernDevice(16, 0x03, framebufferBytes != 0 ? 0x00 : 0x80, memory, placement, 2),
       displayWidth_(width), displayHeight_(height)
 {
     if (framebufferBytes != 0) {

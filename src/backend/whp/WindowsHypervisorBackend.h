@@ -28,8 +28,11 @@ public:
     // WHP implements itself (CPUID 0x40000000 leaves, reference TSC page,
     // frequency MSRs, synthetic timers): guests then read the time and the
     // TSC frequency without calibration and without VM exits.
+    // `unhandledMsrExits`: an MSR that WHP does not implement exits to the
+    // VMM (WHvRunVpExitReasonX64MsrAccess) instead of raising #GP in the
+    // guest; the other MSRs stay inside the hypervisor. See MsrExitsEnabled().
     explicit Partition(std::uint32_t virtualProcessorCount, bool enableLocalApic = false,
-                       bool hypervEnlightenments = false);
+                       bool hypervEnlightenments = false, bool unhandledMsrExits = false);
     ~Partition();
 
     Partition(const Partition&) = delete;
@@ -42,6 +45,14 @@ public:
     WHV_SYNTHETIC_PROCESSOR_FEATURES SyntheticFeatures() const noexcept { return syntheticFeatures_; }
     void* AllocateAndMapGuestMemory(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes,
                                     bool trackDirtyPages = false);
+    // Memory owned by a device (firmware flash): page-aligned host memory
+    // mapped with `flags` (WHvMapGpaRangeFlagRead/Write/Execute). An access
+    // the flags forbid (a write to a read-only page) exits to the VMM as a
+    // memory access. Not part of the guest RAM list.
+    void MapDeviceMemory(void* hostAddress, std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes,
+                         WHV_MAP_GPA_RANGE_FLAGS flags);
+    void UnmapDeviceMemory(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes);
+    bool MsrExitsEnabled() const noexcept { return msrExits_; }
     // Fills one bit per 4 KiB page written since the previous query (and
     // clears them). Returns false if dirty tracking is unavailable.
     bool QueryDirtyPages(std::uint64_t guestPhysicalAddress, std::size_t sizeInBytes,
@@ -95,6 +106,7 @@ private:
     WHV_PARTITION_HANDLE handle_ = nullptr;
     WHV_SYNTHETIC_PROCESSOR_FEATURES syntheticFeatures_{};
     HRESULT lastDoorbellError_ = S_OK;
+    bool msrExits_ = false;
     std::vector<std::uint32_t> createdProcessors_;
     std::vector<MemoryMapping> memoryMappings_;
 };

@@ -31,6 +31,10 @@ public:
     // The guest has locked the disc in the drive (Linux does it while the
     // disc is mounted): replacing it from the host leaves a stale mount.
     bool CdromLocked() const noexcept;
+    // A channel without any drive reads as a floating bus (0xFF, the
+    // default, which Linux expects), or as 0x00 like QEMU's IDE (UEFI: the
+    // EDK2 ATA driver otherwise waits 35 s per empty channel for BSY to clear).
+    void SetEmptyChannelReadsZero(bool zero) noexcept { emptyChannelZero_ = zero; }
     // Host-side media change (VM-wide lock held): inserts `image`, or ejects
     // the disc when it is nullptr. The guest is told through a unit attention
     // and a media event, as with a real drive.
@@ -40,6 +44,13 @@ public:
     void IoWrite(std::uint16_t port, std::uint8_t size, std::uint32_t value) override;
 
 private:
+    std::uint32_t EmptyChannelValue(std::uint8_t size) const noexcept
+    {
+        if (emptyChannelZero_) return 0;
+        return size == 4 ? 0xFFFFFFFFu : (size == 2 ? 0xFFFFu : 0xFFu);
+    }
+    bool emptyChannelZero_ = false;
+
     enum class Kind : std::uint8_t { None, Disk, Cdrom };
     enum class Transfer : std::uint8_t { None, PioIn, PioOut, DmaIn, DmaOut, Packet, AtapiPioIn, AtapiDmaIn };
 

@@ -17,6 +17,7 @@
 #include <WinHvEmulation.h>
 #include <powrprof.h>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -47,12 +48,18 @@ class VgaRegisters;
 class PostPort;
 class VirtioSound;
 class Virtio9p;
+class FirmwareFlash;
+class FwCfg;
+class FirmwareDebugPort;
 
 enum class DiskBus { Virtio, Ide };
 // Network card attachment, as in VirtualBox.
 enum class NetworkMode { None, Nat, Bridged, Internal, HostOnly, Disconnected };
 enum class BootDevice { Auto, Cdrom, Disk, Kernel };
 enum class DisplayMode { Graphics, Text, None };
+// How the VM starts: the VMM loads Linux itself (fast, Debian preseed), or a
+// UEFI firmware (OVMF) boots whatever is on the disc or disk.
+enum class Firmware { LinuxDirect, Uefi };
 
 inline constexpr std::size_t kMaxShares = 3;
 
@@ -99,6 +106,11 @@ struct VmConfig {
     std::vector<SharedFolder> shares; // Up to kMaxShares, one virtio-9p card each.
     bool hyperv = true;            // Hyper-V enlightenments (reference TSC page, synthetic timers).
     bool gpuShare = true;          // virgl screen shown from a shared Direct3D texture (no readback).
+    Firmware firmware = Firmware::LinuxDirect;
+    std::filesystem::path uefiCode; // OVMF_CODE (default: firmware\OVMF_CODE_4M.fd next to the VMM).
+    std::filesystem::path uefiVars; // The VM's variable store (created from OVMF_VARS_4M.fd if missing).
+    bool uefiDebug = false;         // OVMF debug log (port 0x402) in the VMM log.
+    std::array<std::uint8_t, 16> uuid{}; // SMBIOS/fw_cfg UUID (zero: derived from the name).
 };
 
 // What the display window should render.
@@ -155,12 +167,14 @@ public:
     VmConfig CurrentConfig() const;
     // Guest clock: checks it now through qemu-guest-agent (when the guest runs it).
     void SyncGuestTime(const char* reason);
-    // Guest agents, from the state of their virtio-serial ports (opened by
-    // the guest daemons, notified by the device): nothing is polled.
+    // Guest agents, from their virtio-serial ports and the handshake each one
+    // does when it opens its port (guest-sync reply, capability announce):
+    // nothing is polled, and a firmware driver that merely opens the ports
+    // (OVMF's VirtioSerialDxe) does not count as an agent.
     struct GuestAgentsState {
-        bool qemu = false;      // qemu-guest-agent has its port open.
+        bool qemu = false;      // qemu-guest-agent answered guest-sync since its port opened.
         bool spicePort = false; // The VM has a spice-vdagent port (graphical display).
-        bool spice = false;     // spice-vdagentd has it open.
+        bool spice = false;     // spice-vdagentd announced its capabilities.
     };
     GuestAgentsState GuestAgents() const noexcept;
     // The guest tools CD shipped next to VirtualiseurVM.exe (empty if missing).
@@ -229,6 +243,8 @@ private:
     void HandleIoExit(VcpuContext& context, const WHV_RUN_VP_EXIT_CONTEXT& exit);
     void HandleMmioExit(VcpuContext& context, const WHV_RUN_VP_EXIT_CONTEXT& exit);
     void HandleHaltExit(std::uint32_t index);
+    void HandleMsrExit(std::uint32_t index, const WHV_RUN_VP_EXIT_CONTEXT& exit);
+    void SetupFirmware();
     void RequestStop(VmExit reason);
     void CancelAll();
 
@@ -282,6 +298,11 @@ private:
     HPOWERNOTIFY powerNotify_ = nullptr;
     std::unique_ptr<VgaRegisters> vga_;
     std::unique_ptr<PostPort> post_;
+    std::unique_ptr<FirmwareFlash> flash_;
+    std::unique_ptr<FwCfg> fwCfg_;
+    std::unique_ptr<FirmwareDebugPort> debugPort_;
+    std::mutex msrReportMutex_;
+    std::vector<std::uint32_t> msrReported_; // MSRs already logged (UEFI).
     std::unique_ptr<NetworkBackend> network_;
 
     std::vector<std::thread> vcpus_;
@@ -296,6 +317,8 @@ private:
     std::atomic_uint64_t exits_ = 0;
     std::atomic_uint64_t ioExits_ = 0;
     std::atomic_uint64_t mmioExits_ = 0;
+    // Accesses per I/O port (diagnostic: the busiest ones appear in Statistics()).
+    std::unique_ptr<std::atomic_uint32_t[]> portCounts_ = std::make_unique<std::atomic_uint32_t[]>(65536);
     std::atomic_uint64_t unhandledPorts_ = 0;
     std::chrono::steady_clock::time_point haltSince_{};
 };
