@@ -12,7 +12,7 @@ Dans Documents\Virtualiseur\VMs : un dossier par machine (configuration, disque 
 
 OPTIONNEL
 
-- Accès par pont (la VM sur votre réseau local) : installez Npcap, gratuit, depuis https://npcap.com. Les autres modes réseau (NAT, réseau interne, réseau privé hôte) n'en ont pas besoin.
+- Accès par pont (la VM sur votre réseau local) : installez Npcap, gratuit (lien cliquable sous ce texte, ou case à cocher sur la dernière page). Les autres modes réseau (NAT, réseau interne, réseau privé hôte) n'en ont pas besoin.
 - Accélération 3D : incluse. En cas de problème d'affichage, décochez « Accélération 3D » dans la configuration de la machine (page Affichage).
 
 RACCOURCIS DANS LA FENÊTRE D'UNE MACHINE

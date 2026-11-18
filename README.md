@@ -59,6 +59,8 @@ Mesures sur un i5-11300H, VM de 2 vCPU et 2 Gio :
 
 ## Installateur
 
+**Installer sans compiler** : télécharge `Virtualiseur-Setup.exe` dans les [Releases](https://github.com/NathanGir33/Virtualiseur/releases/latest). Il faut Windows 10 (version 2004 ou plus récente) ou Windows 11 en 64 bits x64 (pas ARM), un processeur dont la virtualisation est activée dans le BIOS/UEFI (Intel VT-x ou AMD-V) et les droits administrateur pour l'installation. L'installateur n'est pas signé : Windows SmartScreen peut afficher « Windows a protégé votre ordinateur » ; clique sur *Informations complémentaires* puis *Exécuter quand même*. Les systèmes invités pris en charge sont Linux (testé surtout avec Debian 13) ; Windows invité demandera l'UEFI (feuille de route).
+
 `.\build.ps1 -Installer` compile tout puis produit `installer\Output\Virtualiseur-Setup.exe` (Inno Setup 6 : `winget install JRSoftware.InnoSetup`). Il installe Virtualiseur dans `Program Files` avec le runtime Visual C++, la 3D (virglrenderer) et le NAT (libslirp). Il crée les raccourcis et active au besoin la Plateforme de l'hyperviseur Windows (un redémarrage est alors demandé). Le désinstallateur apparaît dans *Paramètres → Applications* et dans le menu Démarrer ; il propose de supprimer aussi `Documents\Virtualiseur\VMs`. Npcap, utile seulement pour l'accès par pont, n'est pas inclus : sa licence gratuite interdit de le redistribuer.
 
 ## Démarrage rapide
@@ -110,7 +112,7 @@ Le [README du VMM](src/vmm/README.md) décrit le modèle d'exécution, les inter
 
 Le code de Virtualiseur est publié sous licence [MIT](LICENSE).
 
-libslirp (BSD-3-Clause) et ses dépendances (glib : LGPL-2.1+) sont restaurées par vcpkg. virglrenderer et libepoxy (MIT), libwinpthread (MIT/BSD) et libgcc_s (GPL avec exception d'exécution) viennent de MSYS2. Il faut lire leurs notices avant toute redistribution publique. QEMU n'est ni inclus ni utilisé : Virtualiseur a son propre moteur.
+libslirp (BSD-3-Clause) et ses dépendances (glib : LGPL-2.1+) sont restaurées par vcpkg. virglrenderer et libepoxy (MIT), libwinpthread (MIT/BSD) et libgcc_s (GPL avec exception d'exécution) viennent de MSYS2. `build.ps1` assemble leurs textes de licence complets dans `dist\LICENCES-TIERCES.txt` (`tools\gen-third-party-notices.ps1`), installé avec le programme (menu Démarrer → *Licences*). QEMU n'est ni inclus ni utilisé : Virtualiseur a son propre moteur.
 
 ## Limites connues
 

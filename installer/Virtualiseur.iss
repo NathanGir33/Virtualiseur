@@ -8,8 +8,10 @@
 ; Documents\Virtualiseur\VMs : la désinstallation propose de les supprimer.
 
 #define AppName "Virtualiseur"
-#define AppVersion "0.2.0"
+#define AppVersion "0.3.0"
 #define AppExe "VirtualiseurManager.exe"
+; Npcap (accès par pont) ne peut pas être redistribué : lien vers son site.
+#define NpcapUrl "https://npcap.com/#download"
 
 [Setup]
 AppId={{E1D571A7-866A-4604-BA1E-BB4B5E8FC00C}
@@ -56,13 +58,16 @@ Source: "..\docs\run-linux-v1.md"; DestDir: "{app}\docs"; DestName: "guide.md"; 
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"; Comment: "Gestionnaire de machines virtuelles"
-Name: "{group}\Guide d'utilisation"; Filename: "{app}\docs\guide.md"
+; Un PC neuf n'a pas forcément d'application pour les .md : ouverts dans le Bloc-notes.
+Name: "{group}\Guide d'utilisation"; Filename: "{win}\notepad.exe"; Parameters: """{app}\docs\guide.md"""
+Name: "{group}\Licences"; Filename: "{win}\notepad.exe"; Parameters: """{app}\LICENCES-TIERCES.txt"""
 Name: "{group}\Désinstaller {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Run]
 Filename: "{sys}\dism.exe"; Parameters: "/online /enable-feature /featurename:HypervisorPlatform /all /norestart /quiet"; StatusMsg: "Activation de la Plateforme de l'hyperviseur Windows (cela peut prendre une minute)..."; Flags: runhidden waituntilterminated; Tasks: enablewhp
 Filename: "{app}\{#AppExe}"; Description: "Lancer {#AppName}"; Flags: nowait postinstall skipifsilent; Check: not NeedRestart
+Filename: "{#NpcapUrl}"; Description: "Ouvrir la page de téléchargement de Npcap (pour l'accès par pont, facultatif)"; Flags: shellexec nowait postinstall skipifsilent unchecked; Check: not NpcapInstalled
 
 [UninstallDelete]
 ; Fichiers créés après l'installation dans le dossier du programme.
@@ -72,6 +77,47 @@ Type: filesandordirs; Name: "{app}"
 var
   WhpChecked: Boolean;
   WhpState: Boolean;
+
+{ Npcap installé : sa DLL est dans System32\Npcap (même test que le gestionnaire). }
+function NpcapInstalled(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{sys}\Npcap\wpcap.dll'));
+end;
+
+procedure OpenNpcapPage(Sender: TObject);
+var
+  ErrorCode: Integer;
+begin
+  ShellExecAsOriginalUser('open', '{#NpcapUrl}', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
+end;
+
+{ Page « Premier démarrage » : un lien cliquable vers Npcap sous le texte. }
+procedure InitializeWizard();
+var
+  Link: TNewStaticText;
+  Memo: TRichEditViewer;
+begin
+  Memo := WizardForm.InfoAfterMemo;
+  Memo.Height := Memo.Height - ScaleY(30);
+  Link := TNewStaticText.Create(WizardForm);
+  Link.Parent := Memo.Parent;
+  Link.Left := Memo.Left;
+  Link.Top := Memo.Top + Memo.Height + ScaleY(10);
+  Link.AutoSize := True;
+  if NpcapInstalled() then
+  begin
+    Link.Caption := 'Npcap est déjà installé sur ce PC : l''accès par pont est disponible.';
+    Link.Font.Color := clGreen;
+  end
+  else
+  begin
+    Link.Caption := 'Accès par pont (facultatif) : télécharger Npcap sur npcap.com';
+    Link.Font.Color := clBlue;
+    Link.Font.Style := [fsUnderline];
+    Link.Cursor := crHand;
+    Link.OnClick := @OpenNpcapPage;
+  end;
+end;
 
 { État de la fonctionnalité Windows « HypervisorPlatform » (mis en cache). }
 function WhpEnabled(): Boolean;
