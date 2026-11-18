@@ -13,6 +13,9 @@ namespace virtualiseur::whp {
 //   header   magic "VRTXMACH", format version, header size, block size
 //            (64 KiB), disk virtual size, config size, CRC32 of the header
 //   config   the machine settings (UTF-8 text), then its CRC32
+//   firmware (version 2 only) the UEFI variable store, the machine's
+//            vars.fd: size (0 for a Linux direct machine, or a UEFI one
+//            never started), CRC32 of the bytes, then the bytes
 //   blocks   one record per non-zero 64 KiB block of the disk:
 //            {index, stored size, real size, flags, CRC32 of the real data}
 //            then the stored bytes: XPRESS-compressed (Windows compression
@@ -32,19 +35,25 @@ struct ArchiveCancelled final : std::exception {
 };
 
 // Writes `target` (through a .tmp file renamed at the end) from the disk
-// state `disk` (a raw image or the top layer of a chain, opened read-only).
-void ExportMachine(const std::filesystem::path& disk, const std::string& config, const std::filesystem::path& target,
-                   const ArchiveProgress& progress);
+// state `disk` (a raw image or the top layer of a chain, opened read-only)
+// and the UEFI variable store `vars` (empty path: none).
+void ExportMachine(const std::filesystem::path& disk, const std::string& config, const std::filesystem::path& vars,
+                   const std::filesystem::path& target, const ArchiveProgress& progress);
 
-// Header and settings only (to propose a name and check the file).
+// Header, settings and variable store size (to propose a name and check the file).
 struct ArchiveInfo {
+    std::uint32_t version = 0;
     std::uint64_t virtualSize = 0;
-    std::string config; // UTF-8.
+    std::string config;         // UTF-8.
+    std::uint32_t varsSize = 0; // 0: no UEFI variable store (version 1, or Linux direct).
 };
 ArchiveInfo ReadArchiveInfo(const std::filesystem::path& archive);
 
-// Recreates the disk as a new sparse raw image `disk` (which must not exist).
-// On any error or cancellation `disk` is deleted before the exception leaves.
-void ImportDisk(const std::filesystem::path& archive, const std::filesystem::path& disk, const ArchiveProgress& progress);
+// Recreates the disk as a new sparse raw image `disk` (which must not exist)
+// and, when the archive holds one and `vars` is not empty, the UEFI variable
+// store `vars` (which must not exist either). Returns true if it wrote `vars`.
+// On any error or cancellation both are deleted before the exception leaves.
+bool ImportDisk(const std::filesystem::path& archive, const std::filesystem::path& disk, const std::filesystem::path& vars,
+                const ArchiveProgress& progress);
 
 } // namespace virtualiseur::whp

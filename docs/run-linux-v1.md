@@ -26,16 +26,18 @@ Le disque virtuel est un fichier brut *sparse*, créé au premier démarrage : i
 | Page | Réglages |
 |---|---|
 | Général | nom, libellé du système invité, dossier |
-| Système | mémoire vive et processeurs (curseurs), ordre de démarrage, horloge UTC ou locale |
+| Système | mémoire vive et processeurs (curseurs), ordre de démarrage, horloge UTC ou locale, micrologiciel (UEFI ou Linux direct) |
 | Affichage | carte graphique (virtio-gpu ou framebuffer simple), résolution initiale, accélération 3D |
 | Stockage | fichier et taille du disque, contrôleur virtio-blk ou IDE, image ISO du lecteur CD (**Éjecter**) |
 | Audio | activation de la carte son |
 | Réseau | carte réseau et mode d'accès (NAT, accès par pont, réseau interne, réseau privé hôte, câble débranché), carte de l'hôte ou nom du réseau, adresse MAC, redirection de ports |
-| Installation | installateur Debian texte ou graphique, fichier preseed, outils invité |
+| Installation | installateur Debian texte ou graphique, fichier preseed, outils invité (mode Linux direct seulement) |
 
 Pour un disque existant, le curseur ne descend pas sous sa taille actuelle : l'augmenter agrandit le fichier à l'enregistrement. Il faut ensuite agrandir la partition dans l'invité (GParted, `growpart` puis `resize2fs`).
 
 Le fichier preseed facultatif, par exemple [`preseed-debian.cfg`](preseed-debian.cfg), déroule l'installation sans aucune question.
+
+**Micrologiciel** (page Système) : *UEFI* (par défaut pour une nouvelle machine) démarre le menu de l'ISO puis le chargeur installé, pour toute distribution ; ses variables (entrées de démarrage) sont dans `vars.fd`, dans le dossier de la machine, créé au premier démarrage. *Linux direct* est l'ancien mode : le VMM charge lui-même le noyau, et lui seul applique le preseed. Les machines créées avant l'UEFI restent en Linux direct. Le choix est verrouillé machine allumée ; changer de micrologiciel sur un disque déjà installé demande une confirmation, car un système installé dans un mode ne démarre pas forcément dans l'autre (partition EFI absente, `/boot` illisible).
 
 Un double-clic sur une machine, ou **Démarrer** (Entrée), l'ouvre dans sa propre fenêtre. Un clic droit dans la liste donne toutes les commandes, dont **Afficher le journal**.
 
@@ -122,7 +124,7 @@ Bouton **Instantanés** du gestionnaire : *Prendre* fige le disque, même machin
 
 **Cloner** (même fenêtre, sur l'état actuel ou un instantané) : un *clone complet* est une copie indépendante du disque (seuls les blocs utilisés sont écrits, sans l'historique) ; un *clone lié* est créé tout de suite et ne stocke que ses propres modifications, mais il lit le disque de la source : tant qu'il existe, on ne peut supprimer ni la source ni l'instantané dont il part, ni renommer l'une ou l'autre. Depuis l'état actuel, un clone lié commence par un instantané « Clone <nom> » de la source (gelé si elle tourne). Source et clones liés peuvent tourner en même temps. Chaque clone reçoit une nouvelle adresse MAC et un nouvel identifiant. Le gestionnaire accepte `--library <dossier>` pour ouvrir une autre bibliothèque.
 
-**Exporter / importer** : *Machine → Exporter…* enregistre la machine éteinte dans un fichier `.vrtx` (configuration + disque compressé, sans l'historique des instantanés) ; le bouton *Exporter…* de la fenêtre Instantanés exporte l'instantané choisi, même machine allumée. *Fichier → Importer une machine…* lit le fichier, propose un nom libre, puis recrée la machine avec un disque sparse, une nouvelle adresse MAC et un nouvel identifiant : elle peut tourner à côté de l'originale. Les chemins de l'autre ordinateur (ISO, preseed, dossiers partagés) qui n'existent pas ici sont retirés. Un fichier abîmé (CRC, troncature) est refusé et rien n'est créé ; *Annuler* pendant l'export ou l'import ne laisse aucun fichier.
+**Exporter / importer** : *Machine → Exporter…* enregistre la machine éteinte dans un fichier `.vrtx` (configuration + disque compressé, sans l'historique des instantanés) ; le bouton *Exporter…* de la fenêtre Instantanés exporte l'instantané choisi, même machine allumée. *Fichier → Importer une machine…* lit le fichier, propose un nom libre, puis recrée la machine avec un disque sparse, une nouvelle adresse MAC et un nouvel identifiant : elle peut tourner à côté de l'originale. Les chemins de l'autre ordinateur (ISO, preseed, dossiers partagés) qui n'existent pas ici sont retirés. Une machine UEFI emporte ses variables (`vars.fd`) ; à l'import, une machine UEFI sans variables (fichier de l'ancien format, ou machine jamais démarrée) en reçoit de neuves. Un fichier abîmé (CRC, troncature) est refusé et rien n'est créé ; *Annuler* pendant l'export ou l'import ne laisse aucun fichier. Chaque clone, lié ou complet, reçoit sa propre copie de `vars.fd` ; supprimer une machine supprime aussi ses variables.
 
 ## 7. Diagnostic
 
@@ -135,8 +137,8 @@ Pour une console série interactive, lance le VMM dans un terminal avec `--displ
 
 ## Limites connues
 
-- Seuls les systèmes Linux avec noyau et initrd sur ext2/3/4 démarrent depuis le disque. Btrfs, XFS, ou `/boot` sur LVM ou chiffré ne sont pas encore lus.
-- Pas encore de firmware UEFI : les ISO non Linux et Windows ne démarrent pas.
+- En mode Linux direct, seuls les systèmes avec noyau et initrd sur ext2/3/4 démarrent depuis le disque (Btrfs, XFS, LVM ou chiffrement : utiliser l'UEFI).
+- Windows invité n'est pas encore testé sur le firmware UEFI.
 - Sans pilote `virtio_gpu` dans l'invité, la résolution reste celle choisie au démarrage. Avec lui, redimensionner la fenêtre change la résolution.
 - La souris doit être capturée tant que l'invité n'a pas chargé `virtio_input` (installateur, démarrage).
 - L'installateur Debian graphique (GTK) repasse en mode texte (« Framebuffer not available »).

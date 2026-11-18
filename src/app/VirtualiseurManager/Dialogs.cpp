@@ -94,6 +94,9 @@ enum ControlId : int {
     IdForwardAdd,
     IdFullscreen,
     IdSnapshotExport,
+    IdFirmware,
+    IdFirmwareInfo,
+    IdInstallNote,
 };
 constexpr int kTrackOffset = 1000;
 constexpr int kSpinOffset = 2000;
@@ -928,12 +931,19 @@ private:
         AddLabel(kPageSystem, L"Horloge matérielle :", kLeft, 296);
         AddCombo(kPageSystem, IdRtc, {L"UTC (Linux)", L"Heure locale (Windows)"}, kField, 296, kFieldWidth);
         SetComboIndex(IdRtc, c.rtcLocal ? 1 : 0);
+        AddLabel(kPageSystem, L"Micrologiciel :", kLeft, 336);
+        AddCombo(kPageSystem, IdFirmware, {L"UEFI (OVMF, recommandé)", L"Linux direct (sans BIOS, ancien mode)"}, kField, 336,
+                 kFieldWidth);
+        SetComboIndex(IdFirmware, c.firmware == Firmware::Uefi ? 0 : 1);
+        // Locked while the machine is on: the VM owns its firmware and vars.fd.
+        EnableWindow(Item(IdFirmware), vm_.state == RunState::Stopped);
+        AddStatic(kPageSystem, L"", kField, 372, kFieldWidth, 60, ui::Font().caption, color::kSecondary, SS_LEFT, IdFirmwareInfo);
         const auto& host = Host();
         AddStatic(kPageSystem,
                   L"Hôte : " + FormatBytes(static_cast<std::uint64_t>(host.memoryMiB) * 1024 * 1024) + L" de RAM, " +
                       std::to_wstring(host.physicalCores) + L" cœurs physiques, " + std::to_wstring(host.logicalCpus) +
                       L" processeurs logiques. Les vCPU de la VM sont des threads de ce PC.",
-                  kLeft, 344, kRight - kLeft, 40, ui::Font().caption, color::kSecondary);
+                  kLeft, 446, kRight - kLeft, 40, ui::Font().caption, color::kSecondary);
 
         // Affichage.
         AddLabel(kPageDisplay, L"Carte graphique :", kLeft, 70);
@@ -1093,11 +1103,8 @@ private:
         AddButton(kPageInstall, IdBrowsePreseed, L"Parcourir…", kRight - 100, 108, 100);
         AddCheck(kPageInstall, IdGuestTools, L"Installer les outils invité pendant l'installation Debian", kField, 150, kFieldWidth);
         SetChecked(IdGuestTools, c.guestTools);
-        AddStatic(kPageInstall,
-                  L"Ces réglages ne servent qu'au démarrage sur l'ISO d'installation Debian. Le fichier preseed "
-                  L"(exemple : docs\\preseed-debian.cfg) automatise entièrement l'installation. Les outils invité "
-                  L"apportent le presse-papiers partagé et le dépôt de fichiers par glisser-déposer.",
-                  kLeft, 196, kRight - kLeft, 80, ui::Font().caption, color::kSecondary);
+        AddStatic(kPageInstall, L"", kLeft, 196, kRight - kLeft, 100, ui::Font().caption, color::kSecondary, SS_LEFT, IdInstallNote);
+        UpdateFirmwareState();
 
         // Bottom bar.
         AddStatic(-1, L"", kLeft, kHeight - 42, kRight - kLeft - 230, 34, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
@@ -1332,6 +1339,9 @@ private:
         case IdBridge:
             if (code == CBN_SELCHANGE) UpdateNetworkState();
             break;
+        case IdFirmware:
+            if (code == CBN_SELCHANGE) UpdateFirmwareState();
+            break;
         case IdMacGenerate:
             SetText(IdMac, RandomMac());
             break;
@@ -1349,6 +1359,37 @@ private:
         default:
             break;
         }
+    }
+
+    // The Installation page (Debian preseed, installer, guest tools through
+    // the preseed) only works in Linux direct mode: in UEFI the ISO's own boot
+    // loader starts its installer.
+    void UpdateFirmwareState()
+    {
+        const bool uefi = ComboIndex(IdFirmware) == 0;
+        for (const int id : {IdInstaller, IdPreseed, IdBrowsePreseed, IdGuestTools}) EnableWindow(Item(id), !uefi);
+        SetText(IdInstallNote,
+                uefi ? L"Micrologiciel UEFI : la machine démarre le menu de l'ISO (GRUB, systemd-boot…) et son installateur, "
+                       L"comme sur un PC. Ces réglages ne servent qu'en mode Linux direct (page Système). Les outils "
+                       L"invité s'installent ensuite pour toute distribution : Machine → Insérer le CD des outils invité."
+                     : L"Ces réglages ne servent qu'au démarrage sur l'ISO d'installation Debian. Le fichier preseed "
+                       L"(exemple : docs\\preseed-debian.cfg) automatise entièrement l'installation. Les outils invité "
+                       L"apportent le presse-papiers partagé et le dépôt de fichiers par glisser-déposer.");
+        const bool changed = uefi != (vm_.config.firmware == Firmware::Uefi);
+        std::wstring info = uefi ? L"OVMF démarre le chargeur de l'ISO ou du disque : toute distribution Linux 64 bits. "
+                                   L"Ses variables (entrées de démarrage) sont dans vars.fd, dans le dossier de la machine."
+                                 : L"Le VMM charge lui-même le noyau Linux de l'ISO ou du disque, sans BIOS. "
+                                   L"Utile pour l'installation Debian automatisée (preseed).";
+        if (vm_.state != RunState::Stopped) info = L"Éteins la machine pour changer de micrologiciel.";
+        else if (changed && vm_.diskExists && vm_.diskAllocated != 0) {
+            info = uefi ? L"Attention : un système installé en Linux direct n'a souvent pas de partition EFI ; "
+                          L"OVMF ne trouvera alors rien à démarrer sur ce disque."
+                        : L"Attention : le système de ce disque a été installé en UEFI ; en Linux direct, son noyau "
+                          L"doit être lisible dans /boot (ext4, pas de Btrfs chiffré).";
+        }
+        SetText(IdFirmwareInfo, info);
+        SetColor(IdFirmwareInfo, changed && vm_.state == RunState::Stopped && vm_.diskExists && vm_.diskAllocated != 0
+                                     ? color::kOrange : color::kSecondary);
     }
 
     void UpdateDisplayState()
@@ -1466,6 +1507,8 @@ private:
         const int boot = ComboIndex(IdBoot);
         c.boot = boot == 1 ? BootOrder::Cdrom : boot == 2 ? BootOrder::Disk : BootOrder::Auto;
         c.rtcLocal = ComboIndex(IdRtc) == 1;
+        c.firmware = ComboIndex(IdFirmware) == 0 ? Firmware::Uefi : Firmware::LinuxDirect;
+        if (vm_.state != RunState::Stopped) c.firmware = vm_.config.firmware; // Locked while on.
 
         c.virtioGpu = ComboIndex(IdGpu) == 0;
         const int resolution = ComboIndex(IdResolution);
@@ -1557,9 +1600,10 @@ public:
     {
     }
 
-private:
     static constexpr int kWidth = 660;
-    static constexpr int kHeight = 700;
+    static constexpr int kHeight = 728;
+
+private:
     static constexpr int kLeft = 28;
     static constexpr int kField = 176;
     static constexpr int kRight = kWidth - 28;
@@ -1623,6 +1667,9 @@ private:
         SetChecked(IdAudio, true);
         SetChecked(IdNetwork, true);
         SetChecked(IdInstaller, false); // The GTK installer still falls back to text mode (see docs).
+        AddCheck(-1, IdFirmware, L"Micrologiciel UEFI (recommandé : démarre le menu de toute ISO)", kLeft, 620, kRight - kLeft);
+        SetChecked(IdFirmware, true);
+        UpdateInstallerOption();
 
         AddStatic(-1, L"", kLeft, kHeight - 86, kRight - kLeft, 20, ui::Font().caption, color::kRed, SS_LEFT, IdMessage);
         AddCheck(-1, IdStartNow, L"Démarrer la machine après sa création", kLeft, kHeight - 44, 300);
@@ -1660,9 +1707,18 @@ private:
         case IdIso:
             if (code == EN_KILLFOCUS) UpdateIso();
             break;
+        case IdFirmware:
+            if (code == BN_CLICKED) UpdateInstallerOption();
+            break;
         default:
             break;
         }
+    }
+
+    // The Debian installer choice only exists in Linux direct mode, for Debian ISOs.
+    void UpdateInstallerOption()
+    {
+        EnableWindow(Item(IdInstaller), !Checked(IdFirmware) && (os_.empty() || os_.rfind(L"Debian", 0) == 0));
     }
 
     void UpdateIso()
@@ -1683,8 +1739,7 @@ private:
             SetText(IdName, UniqueName(os_));
             settingName_ = false;
         }
-        // The Debian installer options only make sense for Debian ISOs.
-        EnableWindow(Item(IdInstaller), os_.empty() || os_.rfind(L"Debian", 0) == 0);
+        UpdateInstallerOption();
     }
 
     bool Commit() override
@@ -1735,6 +1790,7 @@ private:
         c.audio = Checked(IdAudio);
         c.network = Checked(IdNetwork) ? NetworkMode::Nat : NetworkMode::None;
         c.mac = RandomMac(); // Unique per machine: several VMs can share a network.
+        c.firmware = Checked(IdFirmware) ? Firmware::Uefi : Firmware::LinuxDirect;
         c.graphicalInstaller = Checked(IdInstaller) && IsWindowEnabled(Item(IdInstaller));
         request_.config = c;
         request_.startNow = Checked(IdStartNow);
@@ -2029,6 +2085,10 @@ std::wstring ShowImportDialog(HWND owner, const fs::path& library, const std::ve
     if (preview.memoryMiB != 0) summary += L"  ·  " + FormatNumber(preview.memoryMiB) + L" Mio";
     if (preview.cpus != 0) summary += L", " + std::to_wstring(preview.cpus) + (preview.cpus > 1 ? L" processeurs" : L" processeur");
     summary += L"  ·  disque de " + FormatBytes(preview.diskBytes);
+    summary += preview.firmware == Firmware::LinuxDirect ? L"  ·  Linux direct"
+               : preview.hasVars                          ? L"  ·  UEFI, variables incluses"
+                                                          : L"  ·  UEFI, variables neuves";
+    if (preview.version == 1) summary += L" (format .vrtx v1)";
     std::wstring name;
     ImportDialog dialog(summary, suggested, library, vms, name);
     if (!dialog.Run(owner, L"Importer une machine", ImportDialog::kWidth, ImportDialog::kHeight)) return {};
@@ -2469,7 +2529,7 @@ bool ShowSettingsDialog(HWND owner, const VmEntry& vm, const std::vector<VmEntry
 bool ShowNewVmDialog(HWND owner, const fs::path& library, const std::vector<VmEntry>& existing, NewVmRequest& request)
 {
     NewVmDialog dialog(library, existing, request);
-    return dialog.Run(owner, L"Nouvelle machine virtuelle", 660, 700);
+    return dialog.Run(owner, L"Nouvelle machine virtuelle", NewVmDialog::kWidth, NewVmDialog::kHeight);
 }
 
 } // namespace manager

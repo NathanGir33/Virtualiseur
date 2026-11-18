@@ -157,6 +157,7 @@ std::optional<VmEntry> LoadEntry(const fs::path& directory)
         const auto boot = IniRead(file, L"boot", L"auto");
         c.boot = boot == L"cdrom" ? BootOrder::Cdrom : boot == L"disk" ? BootOrder::Disk : BootOrder::Auto;
         c.rtcLocal = IniRead(file, L"rtc", L"utc") == L"local";
+        c.firmware = IniRead(file, L"firmware", L"linux") == L"uefi" ? Firmware::Uefi : Firmware::LinuxDirect;
         c.os = IniRead(file, L"os");
         if (c.os.empty()) c.os = DetectOsFromIso(c.iso);
         c.uuid = IniRead(file, L"uuid");
@@ -172,6 +173,7 @@ std::optional<VmEntry> LoadEntry(const fs::path& directory)
         c.diskGiB = static_cast<unsigned>(fs::file_size(c.disk, error) / (1024ull * 1024 * 1024));
         if (c.diskGiB == 0) c.diskGiB = 20;
         c.mac = DerivedMac(directory.filename().wstring());
+        c.firmware = Firmware::LinuxDirect; // Made before UEFI existed.
         SaveConfig(entry);
         RefreshDiskInfo(entry);
         return entry;
@@ -235,6 +237,82 @@ fs::path FindVmExecutable()
         if (PathExists(candidate)) return candidate;
     }
     return {};
+}
+
+fs::path VarsStorePath(const VmEntry& vm)
+{
+    return vm.directory / L"vars.fd";
+}
+
+fs::path VarsTemplate()
+{
+    const auto vm = FindVmExecutable();
+    if (vm.empty()) return {};
+    const auto image = vm.parent_path() / L"firmware" / L"OVMF_VARS_4M.fd";
+    return PathExists(image) ? image : fs::path{};
+}
+
+void CopyVarsStore(const fs::path& from, const fs::path& to)
+{
+    const auto fail = [](const char* what) {
+        throw std::runtime_error(std::string(what) + " (erreur Windows " + std::to_string(GetLastError()) + ").");
+    };
+    std::error_code same;
+    if (from.lexically_normal() == to.lexically_normal() || fs::equivalent(from, to, same)) {
+        throw std::runtime_error("Copie de vars.fd sur lui-même : chaque machine a le sien.");
+    }
+    std::vector<std::uint8_t> data;
+    {
+        HANDLE source = CreateFileW(from.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (source == INVALID_HANDLE_VALUE) fail("Lecture de vars.fd impossible");
+        LARGE_INTEGER size{};
+        DWORD read = 0;
+        const bool sized = GetFileSizeEx(source, &size) && size.QuadPart > 0 && size.QuadPart <= (16 << 20);
+        if (sized) data.resize(static_cast<std::size_t>(size.QuadPart));
+        const bool ok = sized && ReadFile(source, data.data(), static_cast<DWORD>(data.size()), &read, nullptr) && read == data.size();
+        CloseHandle(source);
+        if (!ok) fail("Lecture de vars.fd impossible");
+    }
+    // A firmware volume ("_FVH" at offset 40), or not a variable store.
+    if (data.size() < 64 || std::memcmp(data.data() + 40, "_FVH", 4) != 0) {
+        throw std::runtime_error("Le fichier source n'est pas un magasin de variables UEFI.");
+    }
+    if (PathExists(to)) throw std::runtime_error("vars.fd existe déjà dans la machine de destination.");
+    auto temporary = to;
+    temporary += L".tmp";
+    HANDLE target = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (target == INVALID_HANDLE_VALUE) fail("Création de vars.fd impossible");
+    DWORD written = 0;
+    const bool ok = WriteFile(target, data.data(), static_cast<DWORD>(data.size()), &written, nullptr) && written == data.size() &&
+                    FlushFileBuffers(target);
+    CloseHandle(target);
+    if (!ok || !MoveFileExW(temporary.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        fail("Écriture de vars.fd impossible");
+    }
+}
+
+bool RemoveVarsStore(const VmEntry& vm, std::wstring& message)
+{
+    const auto store = VarsStorePath(vm);
+    auto temporary = store;
+    temporary += L".tmp";
+    auto lock = store;
+    lock += L".lock";
+    for (const auto& file : {store, temporary, lock}) {
+        if (!DeleteFileW(file.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND && GetLastError() != ERROR_PATH_NOT_FOUND) {
+            message = L"Impossible de supprimer " + file.filename().wstring() + L" (erreur Windows " + std::to_wstring(GetLastError()) +
+                      L") : la machine tourne-t-elle encore ?";
+            return false;
+        }
+    }
+    return true;
+}
+
+const wchar_t* FirmwareText(Firmware firmware)
+{
+    return firmware == Firmware::Uefi ? L"UEFI (OVMF)" : L"Linux direct";
 }
 
 fs::path GuestToolsImage()
@@ -333,6 +411,7 @@ void SaveConfig(const VmEntry& entry)
     put(L"preseed", c.preseed.wstring());
     put(L"boot", c.boot == BootOrder::Cdrom ? L"cdrom" : c.boot == BootOrder::Disk ? L"disk" : L"auto");
     put(L"rtc", c.rtcLocal ? L"local" : L"utc");
+    put(L"firmware", c.firmware == Firmware::Uefi ? L"uefi" : L"linux");
     put(L"uuid", c.uuid);
     put(L"clone_of", c.cloneOf.wstring());
     put(L"os", c.os);
@@ -530,8 +609,11 @@ bool LaunchVm(VmEntry& vm, std::wstring& message)
                     L" --installer " + (c.graphicalInstaller ? L"gtk" : L"text") +
                     L" --guest-tools " + (c.guestTools ? L"on" : L"off") +
                     L" --rtc " + (c.rtcLocal ? L"local" : L"utc") +
+                    L" --firmware " + (c.firmware == Firmware::Uefi ? L"uefi" : L"linux") +
                     L" --serial-log " + QuoteArgument((vm.directory / L"serial.log").wstring()) +
                     L" --log " + QuoteArgument((vm.directory / L"vmm.log").wstring());
+        // Always the machine's own store, wherever its disk is.
+        if (c.firmware == Firmware::Uefi) arguments += L" --uefi-vars " + QuoteArgument(VarsStorePath(vm).wstring());
         if (c.network != NetworkMode::None && ValidMac(c.mac)) arguments += L" --mac " + c.mac;
         if (c.network == NetworkMode::Bridged && !c.bridgeAdapter.empty()) {
             arguments += L" --bridge " + QuoteArgument(c.bridgeAdapter);
@@ -749,6 +831,11 @@ bool CloneVm(const VmEntry& source, bool sourceStopped, const CloneRequest& requ
         clone.config.cloneOf.clear();
         fs::create_directories(directory);
         try {
+            // Its own copy of the variable store, never the source's (linked
+            // clones included): boot entries pointing at the cloned disk's ESP.
+            if (const auto sourceVars = VarsStorePath(source); PathExists(sourceVars)) {
+                CopyVarsStore(sourceVars, VarsStorePath(clone));
+            }
             if (request.linked) {
                 // A layer whose parent is the source's frozen layer, by relative path.
                 clone.config.disk = directory / L"disk.layer";
@@ -873,7 +960,11 @@ bool ExportVm(const VmEntry& vm, bool stopped, std::uint32_t snapshot, const fs:
             config += Utf8(entry) + "\r\n";
         }
 
-        virtualiseur::whp::ExportMachine(state, config, target, progress);
+        // The variable store of a UEFI machine (none yet if never started);
+        // never that of a Linux direct machine, even a leftover one.
+        fs::path vars;
+        if (vm.config.firmware == Firmware::Uefi && PathExists(VarsStorePath(vm))) vars = VarsStorePath(vm);
+        virtualiseur::whp::ExportMachine(state, config, vars, target, progress);
         std::error_code error;
         const auto size = fs::file_size(target, error);
         message = L"« " + vm.config.name + L" » exportée vers " + target.filename().wstring() +
@@ -902,6 +993,9 @@ bool PreviewArchive(const fs::path& archive, ArchivePreview& preview, std::wstri
         preview.memoryMiB = static_cast<unsigned>(std::wcstoul(ArchiveValue(config, L"memory").c_str(), nullptr, 10));
         preview.cpus = static_cast<unsigned>(std::wcstoul(ArchiveValue(config, L"cpus").c_str(), nullptr, 10));
         preview.diskBytes = info.virtualSize;
+        preview.version = info.version;
+        preview.firmware = ArchiveValue(config, L"firmware") == L"uefi" ? Firmware::Uefi : Firmware::LinuxDirect;
+        preview.hasVars = info.varsSize != 0;
         return true;
     } catch (const std::exception& error) {
         message = FromUtf8(error.what());
@@ -923,7 +1017,7 @@ bool ImportVm(const fs::path& archive, const std::wstring& name, const fs::path&
         created = true;
         // The disk first: every block is checked (CRC) before the machine exists.
         const auto disk = directory / L"disk.img";
-        virtualiseur::whp::ImportDisk(archive, disk, progress);
+        const bool varsImported = virtualiseur::whp::ImportDisk(archive, disk, directory / L"vars.fd", progress);
 
         // vm.ini: UTF-16 BOM (Unicode names and paths), then the archive's keys.
         const auto file = directory / L"vm.ini";
@@ -950,8 +1044,20 @@ bool ImportVm(const fs::path& archive, const std::wstring& name, const fs::path&
         for (auto& share : c.shares) {
             if (!share.path.empty() && !PathExists(share.path)) share = {};
         }
+        // UEFI without a store in the archive (version 1, or never started):
+        // a blank one from the template, so the machine starts cleanly.
+        std::wstring firmwareNote;
+        if (c.firmware == Firmware::Uefi && !varsImported) {
+            if (const auto blank = VarsTemplate(); !blank.empty()) {
+                CopyVarsStore(blank, VarsStorePath(*entry));
+                firmwareNote = L" Variables UEFI neuves (l'archive n'en contenait pas).";
+            }
+        } else if (c.firmware == Firmware::LinuxDirect && varsImported) {
+            std::wstring ignored;
+            (void)RemoveVarsStore(*entry, ignored);
+        }
         SaveConfig(*entry);
-        message = L"Machine « " + name + L" » importée.";
+        message = L"Machine « " + name + L" » importée." + firmwareNote;
         return true;
     } catch (const virtualiseur::whp::ArchiveCancelled&) {
         cancelled = true;

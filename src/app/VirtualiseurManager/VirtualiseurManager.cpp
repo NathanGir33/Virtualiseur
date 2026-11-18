@@ -428,7 +428,34 @@ void OpenSettings(int page)
         return;
     }
     VmConfig config;
-    if (ShowSettingsDialog(g_window, *vm, g_vms, config, page)) ApplySettings(*vm, config);
+    if (!ShowSettingsDialog(g_window, *vm, g_vms, config, page)) return;
+    if (config.firmware != vm->config.firmware) {
+        // Never while the machine runs (started meanwhile, or by another
+        // manager): its VM process owns the firmware and vars.fd.
+        if (vm->state != RunState::Stopped || SendCommand(vm->config.name, "status")) {
+            config.firmware = vm->config.firmware;
+            ApplySettings(*vm, config);
+            SetStatus(L"Configuration enregistrée, micrologiciel inchangé : la machine est allumée.");
+            return;
+        }
+        RefreshDiskInfo(*vm);
+        if (vm->diskExists && vm->diskAllocated != 0) {
+            const bool toUefi = config.firmware == Firmware::Uefi;
+            const std::wstring content =
+                toUefi ? L"OVMF démarre le chargeur installé dans la partition système EFI (ESP) du disque. Un système "
+                         L"installé en Linux direct n'en a souvent pas : la machine affichera alors le shell UEFI ou "
+                         L"repartira sur le CD. Les variables UEFI seront créées neuves au prochain démarrage."
+                       : L"Le VMM chargera lui-même le noyau Linux du disque, sans BIOS ni chargeur. Un système installé "
+                         L"en UEFI peut ne pas démarrer ainsi (/boot en Btrfs, chiffrement…). Ses variables UEFI "
+                         L"(vars.fd) sont conservées pour un retour en UEFI.";
+            if (!Confirm(L"Changer le micrologiciel",
+                         L"Passer « " + vm->config.name + L" » en " + FirmwareText(config.firmware) + L" ?", content,
+                         L"Changer", true)) {
+                config.firmware = vm->config.firmware;
+            }
+        }
+    }
+    ApplySettings(*vm, config);
 }
 
 void OpenSnapshots()
@@ -577,6 +604,9 @@ void DeleteVm()
                 L"Le disque est hors du dossier de la machine :\n" + vm->config.disk.wstring(), L"Supprimer le disque", true)) {
         fs::remove(vm->config.disk, error);
     }
+    // The UEFI variable store first, explicitly: vars.fd, vars.fd.tmp, vars.fd.lock.
+    std::wstring varsMessage;
+    const bool varsRemoved = RemoveVarsStore(*vm, varsMessage);
     fs::remove_all(vm->directory, error);
     if (!vm->config.cloneOf.empty() && !vm->config.uuid.empty()) {
         // A linked clone: its source no longer has to keep its layers.
@@ -590,7 +620,9 @@ void DeleteVm()
     g_vms.erase(g_vms.begin() + g_selected);
     RefreshList();
     Select((std::min)(g_selected, static_cast<int>(g_vms.size()) - 1));
-    if (error) {
+    if (!varsRemoved) {
+        SetStatus(L"Suppression incomplète : " + varsMessage);
+    } else if (error) {
         const auto text = error.message();
         SetStatus(L"Suppression incomplète : " + std::wstring(text.begin(), text.end()));
     } else {
@@ -734,6 +766,7 @@ std::vector<DetailCard> BuildCards(const VmEntry& vm)
                      {{L"Mémoire vive", FormatNumber(c.memoryMiB) + L" Mio"},
                       {L"Processeurs", std::to_wstring(c.cpus)},
                       {L"Démarrage", boot},
+                      {L"Micrologiciel", FirmwareText(c.firmware)},
                       {L"Horloge", c.rtcLocal ? L"Heure locale" : L"UTC"}}});
     std::wstring resolution = c.resolution;
     std::replace(resolution.begin(), resolution.end(), L'x', L'×');

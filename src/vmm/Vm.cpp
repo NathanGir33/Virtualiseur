@@ -552,6 +552,7 @@ void Vm::LoadBootImage()
         }
     }
     bool fromIso = false;
+    bool debianInstaller = false;
     if (!selection && (boot == BootDevice::Cdrom || boot == BootDevice::Auto) && iso_) {
         fromIso = true;
         selection = FindIsoBoot(*iso_, config_.graphicalInstaller);
@@ -564,7 +565,7 @@ void Vm::LoadBootImage()
             AppendArgument(selection->image.commandLine, "auto=true priority=critical");
             VMM_INFO("Installation automatique: %s injecté comme /preseed.cfg.", config_.preseed.string().c_str());
         }
-        const bool debianInstaller = selection->description.rfind("installateur Debian", 0) == 0;
+        debianInstaller = selection->description.rfind("installateur Debian", 0) == 0;
         if (config_.guestTools && debianInstaller) {
             // Guest tools: once the installation is done, the installer runs
             // the very install.sh of the guest tools CD in the new system
@@ -612,9 +613,18 @@ void Vm::LoadBootImage()
     std::string commandLine = config_.replaceCommandLine ? config_.commandLine : selection->image.commandLine;
     if (!config_.replaceCommandLine && !config_.commandLine.empty()) AppendArgument(commandLine, config_.commandLine);
     if (!HasArgument(commandLine, "console")) {
-        // The last console= becomes /dev/console: keep the screen primary.
-        AppendArgument(commandLine, "console=ttyS0,115200n8");
-        if (config_.display != DisplayMode::None) AppendArgument(commandLine, "console=tty0");
+        if (debianInstaller && config_.display != DisplayMode::None) {
+            // The Debian installer runs on the serial port as soon as one is
+            // a console (whatever the order), out of the window's sight, and
+            // offers there only the languages a serial terminal can show:
+            // a preseeded fr_FR is then refused and the language asked. The
+            // screen alone.
+            AppendArgument(commandLine, "console=tty0");
+        } else {
+            // The last console= becomes /dev/console: keep the screen primary.
+            AppendArgument(commandLine, "console=ttyS0,115200n8");
+            if (config_.display != DisplayMode::None) AppendArgument(commandLine, "console=tty0");
+        }
     }
     // With the Hyper-V reference TSC page the guest has a stable clock
     // source; otherwise trust the (invariant) TSC rather than let the

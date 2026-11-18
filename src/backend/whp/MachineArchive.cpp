@@ -21,7 +21,8 @@ namespace virtualiseur::whp {
 namespace {
 
 constexpr char kMagic[8] = {'V', 'R', 'T', 'X', 'M', 'A', 'C', 'H'};
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;         // Written; version 1 (no firmware section) is still read.
+constexpr std::uint32_t kMaxVars = 16u << 20; // OVMF stores are 128 KiB to 4 MiB.
 constexpr std::uint32_t kBlockSize = LayerFile::kBlockSize;
 constexpr std::uint64_t kMaxVirtualSize = 64ull << 40; // 64 TiB.
 constexpr std::uint32_t kMaxConfig = 1u << 20;         // 1 MiB of settings text.
@@ -160,10 +161,43 @@ private:
 
 } // namespace
 
-void ExportMachine(const std::filesystem::path& diskPath, const std::string& config, const std::filesystem::path& target,
-                   const ArchiveProgress& progress)
+namespace {
+
+// The whole variable store, read while a running VM may replace it
+// (MoveFileExW): shared for reading, writing and deletion.
+std::vector<std::uint8_t> ReadVarsStore(const std::filesystem::path& path)
+{
+    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (file.Get() == INVALID_HANDLE_VALUE) ThrowLastError("CreateFileW(vars.fd)");
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file.Get(), &size)) ThrowLastError("GetFileSizeEx(vars.fd)");
+    if (size.QuadPart <= 0 || size.QuadPart > kMaxVars) throw std::runtime_error("Magasin de variables UEFI (vars.fd) de taille impossible.");
+    std::vector<std::uint8_t> data(static_cast<std::size_t>(size.QuadPart));
+    DWORD read = 0;
+    if (!ReadFile(file.Get(), data.data(), static_cast<DWORD>(data.size()), &read, nullptr) || read != data.size()) {
+        ThrowLastError("ReadFile(vars.fd)");
+    }
+    return data;
+}
+
+// An OVMF variable store is a firmware volume: "_FVH" at offset 40.
+bool LooksLikeVarsStore(const std::vector<std::uint8_t>& data)
+{
+    return data.size() >= 64 && std::memcmp(data.data() + 40, "_FVH", 4) == 0;
+}
+
+} // namespace
+
+void ExportMachine(const std::filesystem::path& diskPath, const std::string& config, const std::filesystem::path& varsPath,
+                   const std::filesystem::path& target, const ArchiveProgress& progress)
 {
     if (config.size() > kMaxConfig) throw std::invalid_argument("Configuration trop grande.");
+    std::vector<std::uint8_t> vars;
+    if (!varsPath.empty()) {
+        vars = ReadVarsStore(varsPath);
+        if (!LooksLikeVarsStore(vars)) throw std::runtime_error("vars.fd n'est pas un magasin de variables UEFI.");
+    }
     const auto disk = VirtualDisk::Open(diskPath, true); // Read-only: shareable with a running VM's layers.
     const auto blocks = disk.DataBlocks();
 
@@ -188,6 +222,12 @@ void ExportMachine(const std::filesystem::path& diskPath, const std::string& con
         out.Write(config.data(), config.size());
         const auto configCrc = Crc32(config.data(), config.size());
         out.Write(&configCrc, sizeof(configCrc));
+        // Firmware section: size, CRC32, bytes (size 0: no store).
+        const auto varsSize = static_cast<std::uint32_t>(vars.size());
+        const auto varsCrc = Crc32(vars.data(), vars.size());
+        out.Write(&varsSize, sizeof(varsSize));
+        out.Write(&varsCrc, sizeof(varsCrc));
+        out.Write(vars.data(), vars.size());
 
         std::vector<std::byte> data(kBlockSize);
         std::vector<std::uint8_t> packed(kBlockSize);
@@ -256,7 +296,7 @@ FileHeader ReadHeader(Input& in)
     FileHeader header{};
     in.Read(&header, sizeof(header));
     if (std::memcmp(header.magic, kMagic, sizeof(kMagic)) != 0) Corrupt("ce n'est pas une machine exportée");
-    if (header.version != kVersion) Corrupt("version de format inconnue");
+    if (header.version != 1 && header.version != kVersion) Corrupt("version de format inconnue");
     if (header.headerSize != sizeof(FileHeader) || header.blockSize != kBlockSize) Corrupt("en-tête incohérent");
     if (HeaderCrc(header) != header.headerCrc) Corrupt("en-tête altéré (CRC)");
     if (header.virtualSize == 0 || header.virtualSize % VirtualDisk::SectorSize != 0 || header.virtualSize > kMaxVirtualSize) {
@@ -276,6 +316,23 @@ std::string ReadConfig(Input& in, const FileHeader& header)
     return config;
 }
 
+// Version 2: the UEFI variable store, checked (bound, CRC32, firmware
+// volume) before anything is written. Version 1: none.
+std::vector<std::uint8_t> ReadVars(Input& in, const FileHeader& header)
+{
+    if (header.version < 2) return {};
+    std::uint32_t size = 0;
+    std::uint32_t crc = 0;
+    in.Read(&size, sizeof(size));
+    in.Read(&crc, sizeof(crc));
+    if (size > kMaxVars) Corrupt("magasin de variables UEFI trop grand");
+    std::vector<std::uint8_t> vars(size);
+    in.Read(vars.data(), vars.size());
+    if (Crc32(vars.data(), vars.size()) != crc) Corrupt("magasin de variables UEFI altéré (CRC)");
+    if (size != 0 && !LooksLikeVarsStore(vars)) Corrupt("magasin de variables UEFI invalide");
+    return vars;
+}
+
 } // namespace
 
 ArchiveInfo ReadArchiveInfo(const std::filesystem::path& archive)
@@ -284,10 +341,16 @@ ArchiveInfo ReadArchiveInfo(const std::filesystem::path& archive)
     if (file.Get() == INVALID_HANDLE_VALUE) ThrowLastError("CreateFileW(.vrtx)");
     auto in = std::make_unique<Input>(file.Get());
     const auto header = ReadHeader(*in);
-    return ArchiveInfo{header.virtualSize, ReadConfig(*in, header)};
+    ArchiveInfo info;
+    info.version = header.version;
+    info.virtualSize = header.virtualSize;
+    info.config = ReadConfig(*in, header);
+    info.varsSize = static_cast<std::uint32_t>(ReadVars(*in, header).size());
+    return info;
 }
 
-void ImportDisk(const std::filesystem::path& archive, const std::filesystem::path& diskPath, const ArchiveProgress& progress)
+bool ImportDisk(const std::filesystem::path& archive, const std::filesystem::path& diskPath, const std::filesystem::path& varsPath,
+                const ArchiveProgress& progress)
 {
     Handle source(CreateFileW(archive.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
     if (source.Get() == INVALID_HANDLE_VALUE) ThrowLastError("CreateFileW(.vrtx)");
@@ -296,6 +359,9 @@ void ImportDisk(const std::filesystem::path& archive, const std::filesystem::pat
     auto in = std::make_unique<Input>(source.Get());
     const auto header = ReadHeader(*in);
     (void)ReadConfig(*in, header);
+    const auto vars = ReadVars(*in, header); // Written once the whole disk checked out.
+    const bool writeVars = !vars.empty() && !varsPath.empty();
+    bool varsCreated = false;
 
     Handle disk(CreateFileW(diskPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (disk.Get() == INVALID_HANDLE_VALUE) ThrowLastError("CreateFileW(disque importé)");
@@ -357,11 +423,23 @@ void ImportDisk(const std::filesystem::path& archive, const std::filesystem::pat
         CloseDecompressor(decompressor);
         decompressor = nullptr;
         disk.Close();
+        if (writeVars) {
+            Handle store(CreateFileW(varsPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+            if (store.Get() == INVALID_HANDLE_VALUE) ThrowLastError("CreateFileW(vars.fd importé)");
+            varsCreated = true; // From here on, ours to delete on failure.
+            DWORD written = 0;
+            if (!WriteFile(store.Get(), vars.data(), static_cast<DWORD>(vars.size()), &written, nullptr) || written != vars.size() ||
+                !FlushFileBuffers(store.Get())) {
+                ThrowLastError("WriteFile(vars.fd importé)");
+            }
+        }
         if (progress) (void)progress(static_cast<std::uint64_t>(archiveSize.QuadPart), static_cast<std::uint64_t>(archiveSize.QuadPart));
+        return writeVars;
     } catch (...) {
         if (decompressor != nullptr) CloseDecompressor(decompressor);
         disk.Close();
         (void)DeleteFileW(diskPath.c_str());
+        if (varsCreated) (void)DeleteFileW(varsPath.c_str());
         throw;
     }
 }
