@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -58,6 +59,7 @@ enum CommandId : int {
     IdThemeDark,
     IdImport,
     IdExport,
+    IdGuestTools,
 };
 
 COLORREF ToolbarColor(int id, bool paused = false);
@@ -189,6 +191,7 @@ void UpdateCommands()
     enable(IdReset, live);
     enable(IdOpenFolder, vm != nullptr);
     enable(IdShowLog, vm != nullptr && PathExists(vm->directory / L"vmm.log"));
+    enable(IdGuestTools, live);
     const bool paused = state == RunState::Paused;
     ui::SetFlatButton(g_buttons[IdPause], paused ? ui::glyph::kPlay : ui::glyph::kPause, paused ? L"Reprendre" : L"Pause",
                       ToolbarColor(IdPause, paused));
@@ -238,10 +241,28 @@ void PollStates()
             CloseHandle(vm.process);
             vm.process = nullptr;
         }
+        // "running qga=on vdagent=off": the agents' state comes with the
+        // status the manager asks for anyway (port state kept by the VM).
+        auto qemuAgent = AgentState::Unknown;
+        auto spiceAgent = AgentState::Unknown;
         if (const auto reply = SendCommand(vm.config.name, "status")) {
-            state = *reply == "paused" ? RunState::Paused : RunState::Running;
+            state = reply->rfind("paused", 0) == 0 ? RunState::Paused : RunState::Running;
+            const auto agent = [&](const char* key) {
+                const auto at = reply->find(key);
+                if (at == std::string::npos) return AgentState::Unknown; // Older VMM.
+                const auto value = reply->substr(at + std::strlen(key));
+                return value.rfind("on", 0) == 0 ? AgentState::Active : value.rfind("none", 0) == 0 ? AgentState::NoPort
+                                                                                                    : AgentState::Absent;
+            };
+            qemuAgent = agent(" qga=");
+            spiceAgent = agent(" vdagent=");
         } else if (vm.process != nullptr) {
             state = RunState::Starting;
+        }
+        if (qemuAgent != vm.qemuAgent || spiceAgent != vm.spiceAgent) {
+            vm.qemuAgent = qemuAgent;
+            vm.spiceAgent = spiceAgent;
+            changed = true;
         }
         if (state != vm.state) {
             if (state == RunState::Stopped) RefreshDiskInfo(vm); // The disk grew while running.
@@ -427,6 +448,77 @@ void OpenSnapshots()
     }
 }
 
+std::string ToUtf8(const std::wstring& text)
+{
+    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length, nullptr, nullptr);
+    return result;
+}
+
+std::wstring FromUtf8(const std::string& text)
+{
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring result(static_cast<std::size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length);
+    return result;
+}
+
+// Machine → Insérer le CD des outils invité: the tools CD goes in the VM's
+// drive (through its pipe); another disc is replaced only after confirmation.
+void InsertGuestTools()
+{
+    auto* vm = Selected();
+    if (vm == nullptr || vm->state == RunState::Stopped) return;
+    const auto tools = GuestToolsImage();
+    const std::wstring title = L"Outils invité";
+    if (tools.empty()) {
+        Inform(title, L"CD des outils invité introuvable",
+               L"VirtualiseurGuestTools.iso doit se trouver à côté de VirtualiseurManager.exe. Réinstallez Virtualiseur.");
+        return;
+    }
+    const std::wstring instructions =
+        L"Avec un bureau : ouvrez le CD « VIRTUALISEUR » dans le gestionnaire de fichiers et acceptez de lancer son "
+        L"logiciel, ou tapez dans un terminal ouvert sur le CD :\n    sh install.sh\n\n"
+        L"Sans bureau :\n    sudo mount /dev/sr0 /mnt\n    sh /mnt/install.sh\n\n"
+        L"Si le CD paraît vide, l'ancien disque est encore monté : sudo umount /dev/sr0, puis montez-le de nouveau.\n\n"
+        L"Pour toutes les distributions Linux ; la machine doit avoir accès à Internet.";
+    const auto current = SendCommand(vm->config.name, "cdrom");
+    if (!current) {
+        Inform(title, L"La machine ne répond pas", L"Réessayez quand elle aura fini de démarrer.");
+        return;
+    }
+    if (*current != "empty") {
+        const fs::path inserted = FromUtf8(*current);
+        std::error_code error;
+        if (fs::equivalent(inserted, tools, error)) {
+            Inform(title, L"Le CD des outils invité est déjà dans le lecteur", instructions);
+            return;
+        }
+        // A locked disc is mounted in the guest (PREVENT ALLOW MEDIUM REMOVAL seen by the drive).
+        const auto lock = SendCommand(vm->config.name, "cdrom-lock");
+        const bool locked = lock && *lock == "locked";
+        if (!Confirm(title, L"Remplacer « " + inserted.filename().wstring() + L" » ?",
+                     L"Le lecteur de « " + vm->config.name + L" » contient déjà ce disque" +
+                         (locked ? L", que le système invité utilise : il l'a verrouillé (disque monté)." : L".") +
+                         L" Le système invité le verra éjecté : s'il fonctionne depuis lui (système live, installation en "
+                         L"cours), il ne pourra plus le lire." +
+                         (locked ? L" Dans la machine, démontez-le (sudo umount /dev/sr0) pour lire le nouveau CD." : L"") +
+                         L" Vous pourrez le remettre ensuite depuis la fenêtre de la machine (Périphériques → Lecteur optique).",
+                     L"Remplacer", true)) {
+            return;
+        }
+    }
+    const auto reply = SendCommand(vm->config.name, ("cdrom-insert " + ToUtf8(tools.wstring())).c_str());
+    if (!reply || *reply != "ok") {
+        Inform(title, L"Impossible d'insérer le CD",
+               reply ? FromUtf8(reply->rfind("error: ", 0) == 0 ? reply->substr(7) : *reply) : L"La machine ne répond pas.");
+        return;
+    }
+    SetStatus(L"CD des outils invité inséré dans « " + vm->config.name + L" ».");
+    Inform(title, L"CD des outils invité inséré", instructions);
+}
+
 void ExportMachine()
 {
     auto* vm = Selected();
@@ -587,6 +679,7 @@ void ShowContextMenu(POINT screen)
         AppendMenuW(menu, MF_STRING | (stopped ? 0 : MF_GRAYED), IdExport, L"&Exporter…");
         AppendMenuW(menu, MF_STRING, IdOpenFolder, L"&Ouvrir le dossier");
         AppendMenuW(menu, MF_STRING | (PathExists(vm->directory / L"vmm.log") ? 0 : MF_GRAYED), IdShowLog, L"Afficher le &journal");
+        AppendMenuW(menu, MF_STRING | (live ? 0 : MF_GRAYED), IdGuestTools, L"Insérer le CD des &outils invité…");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (stopped ? 0 : MF_GRAYED), IdDelete, L"&Supprimer…");
     }
@@ -613,10 +706,28 @@ std::vector<DetailCard> BuildCards(const VmEntry& vm)
 {
     const auto& c = vm.config;
     std::vector<DetailCard> cards;
+    // Guest tools: known only while the VM runs (state of the agents' ports).
+    DetailRow tools{L"Outils invité", L"Connus quand la machine tourne", color::kSecondary};
+    if (vm.state == RunState::Running || vm.state == RunState::Paused) {
+        const bool qemu = vm.qemuAgent == AgentState::Active;
+        const bool spice = vm.spiceAgent == AgentState::Active;
+        const bool spiceExpected = vm.spiceAgent != AgentState::NoPort;
+        if (vm.qemuAgent == AgentState::Unknown) {
+            tools = {L"Outils invité", L"État inconnu", color::kSecondary};
+        } else if (qemu && (spice || !spiceExpected)) {
+            tools = {L"Outils invité", spiceExpected ? L"Actifs (qemu-guest-agent, spice-vdagent)" : L"Actifs (qemu-guest-agent)",
+                     color::kGreen};
+        } else if (qemu) {
+            tools = {L"Outils invité", L"Actifs (sans spice-vdagent)", color::kGreen};
+        } else {
+            tools = {L"Outils invité", L"Absents : à installer (menu Machine)", color::kOrange};
+        }
+    }
     cards.push_back({ui::glyph::kInfo, L"Général", kPageGeneral,
                      {{L"Nom", c.name},
                       {L"Système invité", c.os.empty() ? L"Non précisé" : c.os},
-                      {L"Dossier", vm.directory.wstring(), CLR_INVALID, true}}});
+                      {L"Dossier", vm.directory.wstring(), CLR_INVALID, true},
+                      tools}});
     const wchar_t* boot = c.boot == BootOrder::Cdrom ? L"Lecteur CD" : c.boot == BootOrder::Disk ? L"Disque dur"
                                                                                                : L"Automatique";
     cards.push_back({ui::glyph::kSystem, L"Système", kPageSystem,
@@ -1174,6 +1285,8 @@ void CreateControls(HWND window)
     AppendMenuW(machine, MF_STRING, IdOpenFolder, L"&Ouvrir le dossier");
     AppendMenuW(machine, MF_STRING, IdShowLog, L"Afficher le &journal");
     AppendMenuW(machine, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(machine, MF_STRING, IdGuestTools, L"Insérer le CD des &outils invité…");
+    AppendMenuW(machine, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(machine, MF_STRING, IdDelete, L"&Supprimer…\tSuppr");
     AppendMenuW(g_menu, MF_POPUP, reinterpret_cast<UINT_PTR>(machine), L"&Machine");
     HMENU view = CreatePopupMenu();
@@ -1248,6 +1361,7 @@ void OnCommand(int id)
     case IdThemeDark: ApplyTheme(ui::Theme::Dark, true); break;
     case IdImport: ImportMachine(); break;
     case IdExport: ExportMachine(); break;
+    case IdGuestTools: InsertGuestTools(); break;
     default: break;
     }
 }

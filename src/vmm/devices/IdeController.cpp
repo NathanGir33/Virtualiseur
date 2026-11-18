@@ -120,6 +120,14 @@ bool IdeController::CdromEjected() const noexcept
     return true;
 }
 
+bool IdeController::CdromLocked() const noexcept
+{
+    for (const auto& channel : channels_) {
+        if (channel.kind == Kind::Cdrom) return channel.locked && !channel.ejected;
+    }
+    return false;
+}
+
 bool IdeController::HasCdrom() const noexcept
 {
     return std::any_of(channels_.begin(), channels_.end(), [](const Channel& channel) { return channel.kind == Kind::Cdrom; });
@@ -834,7 +842,10 @@ void IdeController::ExecutePacket(Channel& channel)
         }
         return Complete(channel);
     }
-    case 0x1E: case 0x2B: case 0xBB: case 0x35: // PREVENT/ALLOW, SEEK, SET CD SPEED, SYNC CACHE
+    case 0x1E: // PREVENT ALLOW MEDIUM REMOVAL: remembered, the host warns before replacing a locked disc.
+        channel.locked = (cdb[4] & 0x01) != 0;
+        return Complete(channel);
+    case 0x2B: case 0xBB: case 0x35: // SEEK, SET CD SPEED, SYNC CACHE
         return Complete(channel);
     case 0x25: { // READ CAPACITY
         if (!mediumPresent) return AtapiCheckCondition(channel, 0x02, 0x3A);

@@ -374,11 +374,31 @@ void QemuGuestAgent::Thaw()
 
 void QemuGuestAgent::MountShares()
 {
-    // Tags are restricted to [A-Za-z0-9._-] (Virtio9p): safe in the command line.
+    // Guest tools installed (install.sh of the tools CD): their boot service
+    // (systemd or OpenRC, not confined) mounts every share on /mnt/<tag>.
+    // The agent leaves it to them: under SELinux (Fedora...) qemu-ga runs
+    // confined and may not create mount points.
+    {
+        int exitCode = -1;
+        std::string errors;
+        if (Execute("test -x /usr/local/sbin/virtualiseur-mount-shares", exitCode, errors) && exitCode == 0) {
+            VMM_INFO("Dossiers partagés : montés sur /mnt/<nom> par le service des outils invité.");
+            return;
+        }
+    }
+    // Without them: /mnt/<tag> as well, through guest-exec (may be refused
+    // under SELinux: the guest tools then do it). Tags are restricted to [A-Za-z0-9._-]
+    // (Virtio9p): safe in the command line; dots are escaped for grep.
     for (const auto& tag : shares_) {
-        const auto directory = "/media/" + tag;
-        const auto script = "d=" + directory + "; if mountpoint -q \"$d\"; then exit 3; fi; mkdir -p \"$d\" && "
-                            "mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 " + tag + " \"$d\"";
+        const auto directory = "/mnt/" + tag;
+        std::string pattern;
+        for (const char c : tag) {
+            if (c == '.') pattern += "\\."; // grep: a literal dot (JsonString escapes the backslash).
+            else pattern += c;
+        }
+        // Already mounted anywhere (by the guest tools service, fstab...): nothing to do.
+        const auto script = "if grep -q '^" + pattern + " [^ ]* 9p ' /proc/mounts; then exit 3; fi; d=" + directory +
+                            "; mkdir -p \"$d\" && mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 " + tag + " \"$d\"";
         int exitCode = -1;
         std::string errors;
         if (!Execute(script, exitCode, errors)) {
@@ -396,7 +416,7 @@ void QemuGuestAgent::MountShares()
         } else if (exitCode == 3) {
             VMM_DEBUG("Dossier partagé « %s » déjà monté dans l'invité.", tag.c_str());
         } else {
-            VMM_WARN("Dossier partagé « %s » non monté dans l'invité (code %d) : %s", tag.c_str(), exitCode,
+            VMM_WARN("Dossier partagé « %s » non monté dans l'invité (code %d) : %s. Les outils invité (Périphériques → Insérer le CD des outils invité) le monteront au démarrage.", tag.c_str(), exitCode,
                      errors.empty() ? "pas de message" : errors.c_str());
         }
     }

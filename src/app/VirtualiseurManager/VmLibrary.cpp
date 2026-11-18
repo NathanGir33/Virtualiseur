@@ -237,6 +237,12 @@ fs::path FindVmExecutable()
     return {};
 }
 
+fs::path GuestToolsImage()
+{
+    const auto image = ExecutableDirectory() / L"VirtualiseurGuestTools.iso";
+    return PathExists(image) ? image : fs::path{};
+}
+
 bool VirglAvailable()
 {
     const auto vm = FindVmExecutable();
@@ -262,7 +268,11 @@ std::vector<VmEntry> LoadVmLibrary(const fs::path& root, std::vector<VmEntry>& p
                 processes.erase(found);
             }
             for (const auto& old : previous) {
-                if (old.config.name == entry->config.name) entry->state = old.state;
+                if (old.config.name == entry->config.name) {
+                    entry->state = old.state;
+                    entry->qemuAgent = old.qemuAgent;
+                    entry->spiceAgent = old.spiceAgent;
+                }
             }
             result.push_back(std::move(*entry));
         }

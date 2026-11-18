@@ -146,6 +146,8 @@ public:
     bool HasCdrom() const;
     void ChangeCdrom(const std::filesystem::path& iso);
     std::filesystem::path CdromImage() const;
+    // The guest has locked the disc in the drive (mounted): a replacement leaves it a stale mount.
+    bool CdromLocked() const;
     // False when the VM has no network card or its backend failed to start.
     bool CanConnectCable() const;
     void SetCableConnected(bool connected);
@@ -153,6 +155,16 @@ public:
     VmConfig CurrentConfig() const;
     // Guest clock: checks it now through qemu-guest-agent (when the guest runs it).
     void SyncGuestTime(const char* reason);
+    // Guest agents, from the state of their virtio-serial ports (opened by
+    // the guest daemons, notified by the device): nothing is polled.
+    struct GuestAgentsState {
+        bool qemu = false;      // qemu-guest-agent has its port open.
+        bool spicePort = false; // The VM has a spice-vdagent port (graphical display).
+        bool spice = false;     // spice-vdagentd has it open.
+    };
+    GuestAgentsState GuestAgents() const noexcept;
+    // The guest tools CD shipped next to VirtualiseurVM.exe (empty if missing).
+    static std::filesystem::path GuestToolsImage();
     // PNG of the screen at most `maxWidth` wide (manager preview); false
     // without a graphical screen yet.
     bool WriteThumbnail(const std::filesystem::path& path, std::uint32_t maxWidth);

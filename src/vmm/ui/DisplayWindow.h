@@ -116,6 +116,8 @@ private:
     // CD-ROM and network cable items (read from the VM when a menu opens).
     void UpdateDeviceMenu();
     void ChooseCdromImage(Vm& vm);
+    // Puts the guest tools CD in the drive (asks before replacing another disc).
+    void InsertGuestTools(Vm& vm);
     void OnKey(WPARAM wParam, LPARAM lParam, bool released);
     void SendScanCode(std::uint8_t code);
     void ReleaseAllKeys();

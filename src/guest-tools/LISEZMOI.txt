@@ -1,0 +1,47 @@
+Outils invité Virtualiseur
+=========================
+
+Pour toute distribution Linux (Debian, Ubuntu, Fedora, openSUSE, Arch,
+Alpine, Void...). Ils installent, depuis les dépôts de la distribution :
+
+- qemu-guest-agent : heure de la machine tenue sur celle de Windows, disques
+  gelés pendant un instantané pris machine allumée ;
+- spice-vdagent, seulement s'il y a un bureau : presse-papiers partagé et
+  fichiers déposés sur la fenêtre de la machine ;
+- un service de démarrage (systemd ou OpenRC) qui monte chaque dossier
+  partagé de la machine sur /mnt/<nom>.
+
+La machine doit avoir accès à Internet (réseau NAT par défaut).
+
+
+Installer
+---------
+
+Avec un bureau : ouvrez le CD « VIRTUALISEUR » dans le gestionnaire de
+fichiers ; s'il propose de lancer le logiciel du disque, acceptez. Sinon,
+ouvrez un terminal dans le dossier du CD et tapez :
+
+    sh install.sh
+
+Sans bureau (serveur) :
+
+    sudo mount /dev/sr0 /mnt
+    sh /mnt/install.sh
+    sudo umount /mnt
+
+Si le CD paraît vide, l'ancien disque du lecteur est encore monté (système
+live par exemple) : sudo umount /dev/sr0, puis montez-le de nouveau.
+
+Le script demande les droits administrateur lui-même (sudo, doas ou su).
+Lancez-le toujours avec « sh » : le CD n'a pas forcément le droit
+d'exécution. Après l'installation, fermez puis rouvrez la session graphique
+pour activer le presse-papiers.
+
+
+Désinstaller le service des dossiers partagés
+---------------------------------------------
+
+    sh install.sh --uninstall
+
+Les paquets qemu-guest-agent et spice-vdagent se retirent avec le
+gestionnaire de paquets de la distribution.

@@ -252,7 +252,10 @@ Iso9660Image::Entry Iso9660Image::FindInDirectory(
         }
         if (!(recordNameLength == 1 && (record[33] == 0 || record[33] == 1))) {
             const std::string name(reinterpret_cast<const char*>(record + 33), recordNameLength);
-            if (NormalizeName(name) == component) {
+            // Rock Ridge keeps the real name ("vmlinuz-linux") where plain
+            // ISO 9660 has a mangled one ("VMLINUZ_LINUX.;1"): try both.
+            const auto rockRidge = RockRidgeName(record, recordLength);
+            if (NormalizeName(name) == component || (!rockRidge.empty() && NormalizeName(rockRidge) == component)) {
                 auto entry = ParseDirectoryRecord(record, recordLength);
                 if ((entry.flags & kMultiExtentFlag) != 0) {
                     throw std::runtime_error("Les fichiers ISO multi-extent ne sont pas encore pris en charge.");
@@ -278,6 +281,28 @@ void Iso9660Image::ReadAt(std::uint64_t offset, void* destination, std::size_t s
     if (!input_.read(static_cast<char*>(destination), static_cast<std::streamsize>(size))) {
         throw std::runtime_error("Lecture incomplète de l'image ISO.");
     }
+}
+
+std::string Iso9660Image::RockRidgeName(const std::uint8_t* record, std::size_t recordLength)
+{
+    // System Use area (SUSP): after the identifier and its padding byte.
+    const std::size_t nameLength = record[32];
+    std::size_t position = 33 + nameLength + ((nameLength % 2) == 0 ? 1 : 0);
+    std::string name;
+    while (position + 4 <= recordLength) {
+        const auto* entry = record + position;
+        const std::size_t length = entry[2];
+        if (length < 4 || length > recordLength - position) break;
+        if (entry[0] == 'S' && entry[1] == 'T') break; // SUSP terminator.
+        if (entry[0] == 'N' && entry[1] == 'M' && length >= 5) {
+            const auto flags = entry[4];
+            if ((flags & 0x06) != 0) return {}; // "." or "..".
+            name.append(reinterpret_cast<const char*>(entry + 5), length - 5);
+            if ((flags & 0x01) == 0) return name; // No CONTINUE: complete.
+        }
+        position += length;
+    }
+    return name; // Continuation areas (CE) are not followed: empty or partial name is ignored by the caller.
 }
 
 Iso9660Image::Entry Iso9660Image::ParseDirectoryRecord(

@@ -1075,10 +1075,10 @@ private:
             SetChecked(IdShareReadOnly + index, share.readOnly);
         }
         AddStatic(kPageShares,
-                  L"Au démarrage, chaque dossier est monté tout seul dans la machine sur /media/<nom> "
-                  L"(il apparaît dans le gestionnaire de fichiers), si le paquet qemu-guest-agent y est installé : "
-                  L"les outils invité de l'installateur Debian le mettent, sinon sudo apt install qemu-guest-agent. "
-                  L"Sans lui : sudo mount -t 9p -o trans=virtio,version=9p2000.L partage /mnt/partage. "
+                  L"Au démarrage, chaque dossier est monté tout seul dans la machine sur /mnt/<nom> par les outils "
+                  L"invité, pour toute distribution Linux : machine allumée, Machine → Insérer le CD des outils invité, "
+                  L"puis sh install.sh depuis le CD. Sans eux : sudo mount -t 9p -o trans=virtio,version=9p2000.L "
+                  L"partage /mnt/partage. "
                   L"La machine ne peut pas sortir du dossier choisi ; liens symboliques et verrous de fichiers ne sont "
                   L"pas pris en charge. Effacer le chemin retire le partage.",
                   kLeft, 330, kRight - kLeft, 100, ui::Font().caption, color::kSecondary);
@@ -1091,7 +1091,7 @@ private:
         AddEdit(kPageInstall, IdPreseed, c.preseed.wstring(), kField, 110, kFieldWidth - 108);
         SendMessageW(Item(IdPreseed), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Aucun (installation interactive)"));
         AddButton(kPageInstall, IdBrowsePreseed, L"Parcourir…", kRight - 100, 108, 100);
-        AddCheck(kPageInstall, IdGuestTools, L"Installer les outils invité avec le bureau (spice-vdagent)", kField, 150, kFieldWidth);
+        AddCheck(kPageInstall, IdGuestTools, L"Installer les outils invité pendant l'installation Debian", kField, 150, kFieldWidth);
         SetChecked(IdGuestTools, c.guestTools);
         AddStatic(kPageInstall,
                   L"Ces réglages ne servent qu'au démarrage sur l'ISO d'installation Debian. Le fichier preseed "

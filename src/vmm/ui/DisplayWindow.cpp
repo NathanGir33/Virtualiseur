@@ -37,6 +37,7 @@ enum MenuId : UINT {
     kMenuCdromEject,
     kMenuCable,
     kMenuMicrophone,
+    kMenuGuestTools,
 };
 
 // Set-1 scan codes (all E0-prefixed) of the keys Windows reports by virtual
@@ -133,6 +134,7 @@ DisplayWindow::DisplayWindow(std::wstring vmName, VmSlot& slot, std::uint32_t wi
     AppendMenuW(cdrom, MF_STRING, kMenuCdromInsert, L"&Choisir une image ISO...");
     AppendMenuW(cdrom, MF_STRING, kMenuCdromEject, L"Éjecter le disque");
     AppendMenuW(devices, MF_POPUP, reinterpret_cast<UINT_PTR>(cdrom), L"&Lecteur optique");
+    AppendMenuW(devices, MF_STRING, kMenuGuestTools, L"Insérer le CD des &outils invité...");
     AppendMenuW(devices, MF_STRING, kMenuCable, L"Câble &réseau branché");
     AppendMenuW(devices, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(devices, MF_STRING, kMenuCaptureKeyboard,
@@ -1636,6 +1638,7 @@ void DisplayWindow::UpdateDeviceMenu()
     ModifyMenuW(menu_, kMenuCdromEject, MF_BYCOMMAND | MF_STRING, kMenuCdromEject, eject.c_str());
     EnableMenuItem(menu_, kMenuCdromInsert, MF_BYCOMMAND | (hasCdrom ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(menu_, kMenuCdromEject, MF_BYCOMMAND | (!image.empty() ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(menu_, kMenuGuestTools, MF_BYCOMMAND | (hasCdrom ? MF_ENABLED : MF_GRAYED));
     EnableMenuItem(menu_, kMenuMicrophone, MF_BYCOMMAND | (vm && vm->HasAudio() ? MF_ENABLED : MF_GRAYED));
     CheckMenuItem(menu_, kMenuMicrophone, MF_BYCOMMAND | (vm && vm->MicrophoneEnabled() ? MF_CHECKED : MF_UNCHECKED));
     const bool canConnect = vm && vm->CanConnectCable();
@@ -1669,6 +1672,58 @@ void DisplayWindow::ChooseCdromImage(Vm& vm)
         MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), length);
         MessageBoxW(window_, (message + wide).c_str(), name_.c_str(), MB_ICONWARNING);
     }
+}
+
+void DisplayWindow::InsertGuestTools(Vm& vm)
+{
+    const auto tools = Vm::GuestToolsImage();
+    if (tools.empty()) {
+        MessageBoxW(window_,
+                    L"Le CD des outils invité (VirtualiseurGuestTools.iso) est introuvable à côté de VirtualiseurVM.exe. "
+                    L"Réinstallez Virtualiseur pour le retrouver.",
+                    name_.c_str(), MB_ICONWARNING);
+        return;
+    }
+    const wchar_t* instructions =
+        L"Avec un bureau : ouvrez le CD « VIRTUALISEUR » dans le gestionnaire de fichiers et acceptez de lancer son "
+        L"logiciel, ou tapez dans un terminal ouvert sur le CD :\n    sh install.sh\n\n"
+        L"Sans bureau :\n    sudo mount /dev/sr0 /mnt\n    sh /mnt/install.sh\n\n"
+        L"Si le CD paraît vide, l'ancien disque est encore monté : sudo umount /dev/sr0, puis montez-le de nouveau.\n\n"
+        L"Pour toutes les distributions Linux ; la machine doit avoir accès à Internet.";
+    const auto current = vm.CdromImage();
+    std::error_code error;
+    if (!current.empty() && std::filesystem::equivalent(current, tools, error)) {
+        MessageBoxW(window_, (std::wstring(L"Le CD des outils invité est déjà dans le lecteur.\n\n") + instructions).c_str(),
+                    name_.c_str(), MB_ICONINFORMATION);
+        return;
+    }
+    if (!current.empty()) {
+        // Another disc: the guest may use it (live system, installation in
+        // progress); a locked disc is mounted in the guest.
+        const bool locked = vm.CdromLocked();
+        const auto question =
+            L"Le lecteur contient « " + current.filename().wstring() + L" »" +
+            (locked ? L", que le système invité utilise : il l'a verrouillé dans le lecteur (disque monté)." : L".") +
+            L"\n\nLe remplacer par le CD des outils invité ? Le système invité verra ce disque éjecté : s'il fonctionne "
+            L"depuis lui (système live, installation en cours), il ne pourra plus le lire." +
+            (locked ? L" Dans la machine, démontez-le (sudo umount /dev/sr0) pour lire le nouveau CD." : L"") +
+            L" Vous pourrez le remettre ensuite par Périphériques → Lecteur optique.";
+        if (MessageBoxW(window_, question.c_str(), name_.c_str(), MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK) {
+            return;
+        }
+    }
+    try {
+        vm.ChangeCdrom(tools);
+    } catch (const std::exception& failure) {
+        const std::string text = failure.what();
+        std::wstring wide(text.size(), L'\0');
+        wide.resize(static_cast<std::size_t>(
+            MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), static_cast<int>(wide.size()))));
+        MessageBoxW(window_, (L"Impossible d'insérer le CD des outils invité : " + wide).c_str(), name_.c_str(), MB_ICONWARNING);
+        return;
+    }
+    MessageBoxW(window_, (std::wstring(L"CD des outils invité inséré.\n\n") + instructions).c_str(), name_.c_str(),
+                MB_ICONINFORMATION);
 }
 
 void DisplayWindow::OnCommand(UINT id)
@@ -1726,6 +1781,9 @@ void DisplayWindow::OnCommand(UINT id)
         break;
     case kMenuCdromInsert:
         if (vm) ChooseCdromImage(*vm);
+        break;
+    case kMenuGuestTools:
+        if (vm) InsertGuestTools(*vm);
         break;
     case kMenuCdromEject:
         if (vm) vm->ChangeCdrom({});

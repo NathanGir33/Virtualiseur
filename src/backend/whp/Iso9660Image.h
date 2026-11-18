@@ -43,6 +43,8 @@ private:
     Entry FindInDirectory(const Entry& directory, const std::string& component) const;
     void ReadAt(std::uint64_t offset, void* destination, std::size_t size) const;
     static Entry ParseDirectoryRecord(const std::uint8_t* record, std::size_t available);
+    // Rock Ridge alternate name (NM entries of the System Use area), empty if none.
+    static std::string RockRidgeName(const std::uint8_t* record, std::size_t recordLength);
 
     std::filesystem::path imagePath_;
     mutable std::ifstream input_;

@@ -394,7 +394,7 @@ void Vm::BuildDevices()
         const auto gsi = static_cast<std::uint32_t>(kShareGsi + index);
         try {
             auto device = std::make_unique<Virtio9p>(*memory_, placement(slot, gsi), share.tag, share.path, share.readOnly);
-            VMM_INFO("Dossier partagé « %s »%s : %s. Monté par qemu-guest-agent sur /media/%s, ou à la main : mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 %s <dossier>",
+            VMM_INFO("Dossier partagé « %s »%s : %s. Monté sur /mnt/%s par les outils invité ou qemu-guest-agent, ou à la main : mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 %s <dossier>",
                      share.tag.c_str(), share.readOnly ? " (lecture seule)" : "", PathUtf8(share.path).c_str(), share.tag.c_str(), share.tag.c_str());
             shares_.push_back(device.get());
             pciBus_->Add(slot, 0, device.get());
@@ -417,7 +417,7 @@ void Vm::BuildDevices()
                       {kVirtioSoundSlot, static_cast<std::uint8_t>(kVirtioSoundGsi)},
                       {kQemuAgentSlot, static_cast<std::uint8_t>(kQemuAgentGsi)}};
     acpi.pciRoutes.insert(acpi.pciRoutes.end(), shareRoutes.begin(), shareRoutes.end());
-    // qemu-guest-agent mounts them in the guest on /media/<tag> when it connects.
+    // qemu-guest-agent mounts them in the guest on /mnt/<tag> when it connects.
     if (qemuAgent_) qemuAgent_->SetShares(std::move(shareTags));
     const auto rsdp = BuildAcpiTables(*memory_, acpi);
     (void)rsdp;
@@ -458,24 +458,41 @@ void Vm::LoadBootImage()
         }
         const bool debianInstaller = selection->description.rfind("installateur Debian", 0) == 0;
         if (config_.guestTools && debianInstaller) {
-            // Guest tools: once the installation is done, install
-            // qemu-guest-agent (clock kept on the host's) and, if a desktop
-            // was chosen, spice-vdagent (clipboard, file drops). The installer
-            // loads /preseed.cfg from its initrd on its own; without
-            // "auto=true" it asks the usual questions. Without network, apt
-            // fails quietly and the installation goes on.
+            // Guest tools: once the installation is done, the installer runs
+            // the very install.sh of the guest tools CD in the new system
+            // (in-target, a chroot: services enabled for the first boot) —
+            // the same tools as any other distribution. The installer loads
+            // /preseed.cfg from its initrd on its own; without "auto=true" it
+            // asks the usual questions. Without network the packages are
+            // skipped and the installation goes on.
             const std::string existing(preseed.begin(), preseed.end());
             if (existing.find("preseed/late_command") != std::string::npos) {
                 VMM_WARN("Le preseed définit déjà preseed/late_command : les outils invité n'y sont pas ajoutés.");
             } else {
-                const std::string line =
-                    "\n# Virtualiseur : agents invité (heure synchronisée ; avec un bureau, presse-papiers "
-                    "partagé et dépôt de fichiers).\n"
-                    "d-i preseed/late_command string in-target apt-get install -y qemu-guest-agent || true; "
-                    "if [ -d /target/usr/share/xsessions ] || [ -d /target/usr/share/wayland-sessions ]; then "
-                    "in-target apt-get install -y spice-vdagent || true; fi\n";
+                std::vector<std::uint8_t> installer;
+                if (const auto tools = GuestToolsImage(); !tools.empty()) {
+                    try {
+                        installer = virtualiseur::whp::Iso9660Image(tools).ReadWholeFile("install.sh");
+                    } catch (const std::exception& error) {
+                        VMM_WARN("Outils invité : install.sh illisible dans %s (%s).", PathUtf8(tools).c_str(), error.what());
+                    }
+                }
+                std::string line;
+                if (!installer.empty()) {
+                    AppendFileToInitrd(selection->image.initrd, "/virtualiseur-install.sh", installer);
+                    line = "\n# Virtualiseur : outils invité (install.sh du CD des outils invité).\n"
+                           "d-i preseed/late_command string cp /virtualiseur-install.sh /target/tmp/virtualiseur-install.sh; "
+                           "in-target sh /tmp/virtualiseur-install.sh || true; rm -f /target/tmp/virtualiseur-install.sh\n";
+                    VMM_INFO("Outils invité : install.sh du CD sera lancé à la fin de l'installation.");
+                } else {
+                    // CD missing next to the VMM: the agents alone.
+                    line = "\n# Virtualiseur : agents invité.\n"
+                           "d-i preseed/late_command string in-target apt-get install -y qemu-guest-agent || true; "
+                           "if [ -d /target/usr/share/xsessions ] || [ -d /target/usr/share/wayland-sessions ]; then "
+                           "in-target apt-get install -y spice-vdagent || true; fi\n";
+                    VMM_INFO("Outils invité : qemu-guest-agent sera installé, et spice-vdagent avec le bureau.");
+                }
                 preseed.insert(preseed.end(), line.begin(), line.end());
-                VMM_INFO("Outils invité : qemu-guest-agent sera installé, et spice-vdagent avec le bureau.");
             }
         }
         if (!preseed.empty()) AppendFileToInitrd(selection->image.initrd, "/preseed.cfg", preseed);
@@ -614,6 +631,12 @@ bool Vm::CdromEjected() const
     return ide_ == nullptr || ide_->CdromEjected();
 }
 
+bool Vm::CdromLocked() const
+{
+    const DeviceGuard guard(deviceLock_);
+    return ide_ != nullptr && ide_->CdromLocked();
+}
+
 bool Vm::HasCdrom() const
 {
     const DeviceGuard guard(deviceLock_);
@@ -748,6 +771,24 @@ bool Vm::WriteThumbnail(const std::filesystem::path& path, std::uint32_t maxWidt
 void Vm::SyncGuestTime(const char* reason)
 {
     if (qemuAgent_) qemuAgent_->RequestTimeSync(reason);
+}
+
+Vm::GuestAgentsState Vm::GuestAgents() const noexcept
+{
+    GuestAgentsState state;
+    state.qemu = qemuAgent_ && qemuAgent_->Connected();
+    state.spicePort = agent_ != nullptr;
+    state.spice = agent_ && agent_->Connected();
+    return state;
+}
+
+std::filesystem::path Vm::GuestToolsImage()
+{
+    std::wstring path(32768, L'\0');
+    path.resize(GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size())));
+    const auto image = std::filesystem::path(path).parent_path() / L"VirtualiseurGuestTools.iso";
+    std::error_code error;
+    return std::filesystem::is_regular_file(image, error) ? image : std::filesystem::path{};
 }
 
 DisplaySnapshot Vm::Display() const

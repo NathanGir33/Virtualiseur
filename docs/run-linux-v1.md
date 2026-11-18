@@ -72,11 +72,25 @@ Chaque machine a sa propre adresse MAC (bouton **Générer** pour en changer). D
 
 ## 6. Presse-papiers et fichiers
 
-Ces fonctions passent par l'agent `spice-vdagent` du système invité.
+Ces fonctions passent par l'agent `spice-vdagent` du système invité, installé par les **outils invité**.
 
-- **Nouvelle VM Debian** : rien à faire. Virtualiseur ajoute une ligne à la configuration de l'installateur, qui installe spice-vdagent à la fin si un bureau a été choisi. Les questions de l'installateur ne changent pas. Il faut le réseau pendant l'installation, comme pour le bureau. `--guest-tools off` désactive cet ajout.
-- **Ubuntu, Fedora…** : leurs images de bureau contiennent déjà l'agent.
-- **VM déjà installée sans l'agent** : `sudo apt install spice-vdagent`, puis ferme et rouvre la session.
+### Outils invité (toute distribution)
+
+Machine allumée : *Machine → Insérer le CD des outils invité* dans le gestionnaire, ou *Périphériques → Insérer le CD des outils invité* dans la fenêtre de la VM. Si le lecteur contient déjà un disque, Virtualiseur demande avant de le remplacer (un système live qui tourne depuis ce disque ne pourrait plus le lire). Puis, dans la VM :
+
+- avec un bureau : ouvre le CD « VIRTUALISEUR » et accepte de lancer son logiciel, ou dans un terminal ouvert sur le CD : `sh install.sh` ;
+- sans bureau : `sudo mount /dev/sr0 /mnt`, puis `sh /mnt/install.sh`.
+
+Le script (POSIX `sh`, à lancer avec `sh` car le CD n'a pas forcément le droit d'exécution) demande les droits administrateur par sudo, doas ou su, reconnaît apt, dnf, yum, zypper, pacman, apk, xbps et emerge, et installe depuis les dépôts de la distribution :
+
+- `qemu-guest-agent` : heure tenue sur celle de Windows, disques gelés pour les instantanés pris machine allumée ;
+- `spice-vdagent`, **seulement s'il y a un bureau** (sessions X11/Wayland ou gestionnaire de connexion) : presse-papiers et dépôt de fichiers ;
+- le service `virtualiseur-shares` (systemd ou OpenRC), qui monte chaque dossier partagé sur `/mnt/<nom>` au démarrage.
+
+Il faut l'accès à Internet (NAT par défaut). Relancer le script ne fait rien de plus ; `sh install.sh --uninstall` retire le service. Après l'installation, ferme et rouvre la session graphique pour le presse-papiers. Le panneau de détails du gestionnaire indique si les agents sont actifs (d'après leurs ports virtio-serial, sans interroger l'invité).
+
+**Nouvelle VM Debian** : rien à faire, l'installateur lance ce même `install.sh` à la fin de l'installation (`--guest-tools off` le désactive).
+
 
 - **Copier-coller** : texte et images, dans les deux sens.
 - **Glisser-déposer** : dépose des fichiers de l'Explorateur Windows sur la fenêtre de la VM. Ils arrivent dans le dossier Téléchargements de l'invité. spice-vdagent ne permet pas le sens invité → Windows.
@@ -85,9 +99,9 @@ Ces fonctions passent par l'agent `spice-vdagent` du système invité.
 
 ## Dossiers partagés
 
-Dans *Configuration → Dossiers partagés*, choisis jusqu'à trois dossiers Windows, chacun avec un nom (tag) et, si besoin, en lecture seule. Au démarrage de la machine, chaque dossier est **monté tout seul** sur `/media/<nom>` (visible dans le gestionnaire de fichiers) si le paquet `qemu-guest-agent` est installé dans l'invité : les outils invité de l'installateur Debian l'installent ; sur une machine existante, `sudo apt install qemu-guest-agent` une fois. Tous les utilisateurs de l'invité peuvent y écrire.
+Dans *Configuration → Dossiers partagés*, choisis jusqu'à trois dossiers Windows, chacun avec un nom (tag) et, si besoin, en lecture seule. Au démarrage de la machine, chaque dossier est **monté tout seul** sur `/mnt/<nom>` par le service des outils invité (voir plus haut), dans toute distribution. Sans ce service mais avec `qemu-guest-agent`, l'agent les monte sur `/media/<nom>`. Tous les utilisateurs de l'invité peuvent y écrire.
 
-Sans l'agent, monte-les par leur nom :
+Sans les outils invité, monte-les par leur nom :
 
 ```sh
 sudo mkdir -p /mnt/partage

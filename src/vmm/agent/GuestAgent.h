@@ -65,6 +65,8 @@ public:
 
     // UI side (any thread).
     bool Ready() const noexcept { return ready_.load(); }
+    // The guest daemon (spice-vdagentd) has the port open.
+    bool Connected() const noexcept { return open_.load(); }
     bool GuestHasCapability(std::uint32_t bit) const;
     std::vector<Message> Take();
     void Send(std::uint32_t type, std::span<const std::uint8_t> data);

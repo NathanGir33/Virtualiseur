@@ -28,6 +28,9 @@ public:
     void AttachCdrom(std::uint32_t channel, virtualiseur::whp::Iso9660Image* image);
     bool CdromEjected() const noexcept;
     bool HasCdrom() const noexcept;
+    // The guest has locked the disc in the drive (Linux does it while the
+    // disc is mounted): replacing it from the host leaves a stale mount.
+    bool CdromLocked() const noexcept;
     // Host-side media change (VM-wide lock held): inserts `image`, or ejects
     // the disc when it is nullptr. The guest is told through a unit attention
     // and a media event, as with a real drive.
@@ -70,6 +73,7 @@ private:
         bool ejected = false;
         std::uint8_t mediaEvent = 0;  // Pending GET EVENT STATUS media event (2 new, 3 removed).
         bool unitAttention = false;   // Next command fails with "medium may have changed".
+        bool locked = false;          // PREVENT ALLOW MEDIUM REMOVAL: the guest uses the disc (mounted).
 
         // Bus master registers.
         std::uint8_t bmCommand = 0;

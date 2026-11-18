@@ -79,11 +79,18 @@ struct VmConfig {
     std::wstring os; // Guest system detected from the ISO name ("Debian 13"), may be empty.
 };
 
+// A guest agent, as the VM reports it in its "status" reply (state of its
+// virtio-serial port, opened by the guest daemon).
+enum class AgentState { Unknown, Absent, Active, NoPort };
+
 struct VmEntry {
     VmConfig config;
     fs::path directory;
     RunState state = RunState::Stopped;
     HANDLE process = nullptr;
+    // While it runs: qemu-guest-agent and spice-vdagent (NoPort without a graphical display).
+    AgentState qemuAgent = AgentState::Unknown;
+    AgentState spiceAgent = AgentState::Unknown;
     // Disk image facts (RefreshDiskInfo).
     bool diskExists = false;
     std::uint64_t diskBytes = 0;
@@ -173,6 +180,9 @@ bool CheckNewVmName(const std::wstring& name, const fs::path& library, const std
 // On error or cancellation the machine folder is removed entirely.
 bool ImportVm(const fs::path& archive, const std::wstring& name, const fs::path& library, const std::vector<VmEntry>& vms,
               const Progress& progress, bool& cancelled, std::wstring& message);
+
+// The guest tools CD shipped next to the manager (empty if missing).
+fs::path GuestToolsImage();
 
 // Starts the VM process; on failure returns false with a message.
 bool LaunchVm(VmEntry& vm, std::wstring& message);

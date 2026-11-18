@@ -68,6 +68,7 @@ if ($Configuration -eq 'Release' -and (Test-Path $vswhere)) {
         Write-Host 'Runtime Visual C++ introuvable : dist\ demandera le Redistributable sur les autres PC.' -ForegroundColor Yellow
     }
 }
+& (Join-Path $root 'tools\gen-guest-tools-iso.ps1') -Target (Join-Path $dist 'VirtualiseurGuestTools.iso')
 & (Join-Path $root 'tools\gen-third-party-notices.ps1') -Dist $dist
 Write-Host "Terminé : $dist" -ForegroundColor Green
 

@@ -54,7 +54,8 @@ public:
     // Last measured offset (guest - host), in milliseconds, if any.
     std::optional<std::int64_t> LastOffsetMs() const;
     // Before the VM starts: shared folders (virtio-9p tags) the agent mounts
-    // in the guest on /media/<tag> each time it connects (guest-exec).
+    // in the guest each time it connects (guest-exec): through the guest tools
+    // service when installed, else directly; always on /mnt/<tag>.
     void SetShares(std::vector<std::string> tags) { shares_ = std::move(tags); }
 
     // Live snapshots. Freeze sends guest-fsfreeze-freeze and waits at most

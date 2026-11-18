@@ -60,8 +60,8 @@ void PrintUsage()
         "  --fullscreen              Ouvre la fenêtre en plein écran (Ctrl droit + F pour en sortir)\n"
         "  --audio on|off            Carte son virtio-sound vers la sortie audio de Windows (défaut on)\n"
         "  --mic on|off              Micro de l'hôte enregistré par l'invité ; sinon il reçoit du silence (défaut off)\n"
-        "  --share <tag>=<dossier>[,ro]  Dossier Windows partagé en virtio-9p (3 au plus), monté sur /media/<tag>\n"
-        "                            par qemu-guest-agent\n"
+        "  --share <tag>=<dossier>[,ro]  Dossier Windows partagé en virtio-9p (3 au plus), monté sur /mnt/<tag>\n"
+        "                            par les outils invité (CD) ou à défaut par qemu-guest-agent\n"
         "  --snapshot list|take <nom>|restore <n>|delete <n>\n"
         "                            Instantanés du disque (--disk), machine éteinte ; ne démarre pas la VM\n"
         "  --hyperv on|off           Enlightenments Hyper-V : horloge TSC de référence, timers synthétiques (défaut on)\n"
@@ -433,6 +433,10 @@ void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
                 else if (command == "status") {
                     const auto state = vm->State();
                     reply = state == VmState::Paused ? "paused" : state == VmState::Running ? "running" : "stopped";
+                    // Agents: state of their virtio-serial ports, kept by the devices (no guest round trip).
+                    const auto agents = vm->GuestAgents();
+                    reply += agents.qemu ? " qga=on" : " qga=off";
+                    reply += !agents.spicePort ? " vdagent=none" : agents.spice ? " vdagent=on" : " vdagent=off";
                 } else if (command == "stats") reply = vm->Statistics();
                 else if (command == "gpu-share on") vm->SetGpuShareAllowed(true);
                 else if (command == "gpu-share off") vm->SetGpuShareAllowed(false);
@@ -460,6 +464,7 @@ void ControlThread(std::stop_token stop, VmSlot& slot, std::wstring pipeName)
                 }
                 else if (command == "cable") reply = vm->CableConnected() ? "on" : "off";
                 else if (command == "cdrom") reply = vm->CdromImage().empty() ? "empty" : PathUtf8(vm->CdromImage());
+                else if (command == "cdrom-lock") reply = vm->CdromLocked() ? "locked" : "unlocked";
                 else if (command == "cdrom-eject" || command.rfind("cdrom-insert ", 0) == 0) {
                     try {
                         vm->ChangeCdrom(command == "cdrom-eject" ? std::filesystem::path{} : Utf8Path(command.substr(13)));

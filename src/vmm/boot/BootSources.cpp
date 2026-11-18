@@ -413,7 +413,7 @@ std::optional<KernelEntry> ParseGrubConfig(const std::string& text)
             entry.kernel = StripGrubDevice(path);
             std::string word;
             while (words >> word) {
-                if (!word.empty() && word[0] == '$') continue; // GRUB variables such as $vt_handoff.
+                if (word.find('$') != std::string::npos) continue; // GRUB variables: $vt_handoff, ${extra_cmdline}, iso-scan/filename=${iso_path}.
                 if (!entry.arguments.empty()) entry.arguments.push_back(' ');
                 entry.arguments += word;
             }
@@ -469,11 +469,16 @@ std::optional<BootSelection> FindIsoBoot(const virtualiseur::whp::Iso9660Image& 
         const char* description;
         bool graphical;
     };
-    static const std::array<Profile, 12> profiles{{
+    // Debian first (its installer gets the preseed and the guest tools): a
+    // live ISO also carries the installer, the live system wins.
+    static const std::array<Profile, 4> debian{{
+        {"live/vmlinuz", "live/initrd.img", "boot=live components", "Debian/Kali live", false},
         {"install.amd/gtk/vmlinuz", "install.amd/gtk/initrd.gz", "", "installateur Debian graphique", true},
         {"install.amd/vmlinuz", "install.amd/initrd.gz", "", "installateur Debian", false},
         {"install/vmlinuz", "install/initrd.gz", "", "installateur Debian", false},
-        {"live/vmlinuz", "live/initrd.img", "boot=live components", "Debian/Kali live", false},
+    }};
+    // Fallbacks when the ISO's own boot configuration cannot be used.
+    static const std::array<Profile, 9> others{{
         {"casper/vmlinuz", "casper/initrd", "boot=casper", "Ubuntu live", false},
         {"casper/vmlinuz", "casper/initrd.gz", "boot=casper", "Ubuntu live", false},
         {"casper/vmlinuz", "casper/initrd.lz", "boot=casper", "Ubuntu live", false},
@@ -481,33 +486,59 @@ std::optional<BootSelection> FindIsoBoot(const virtualiseur::whp::Iso9660Image& 
          "archisobasedir=arch archisolabel={LABEL}", "Arch Linux", false},
         {"images/pxeboot/vmlinuz", "images/pxeboot/initrd.img",
          "root=live:CDLABEL={LABEL} rd.live.image inst.stage2=hd:LABEL={LABEL}", "Fedora/RHEL", false},
+        {"boot/x86_64/loader/linux", "boot/x86_64/loader/initrd", "root=live:CDLABEL={LABEL} rd.live.image",
+         "ISO kiwi (openSUSE, Fedora)", false},
         {"isolinux/vmlinuz", "isolinux/initrd.img", "", "ISO Linux générique", false},
         {"boot/vmlinuz", "boot/initrd.img", "", "ISO Linux générique", false},
-        {"boot/x86_64/loader/linux", "boot/x86_64/loader/initrd", "", "openSUSE", false},
     }};
 
-    for (int pass = 0; pass < 2; ++pass) {
-        for (const auto& profile : profiles) {
-            // First pass honours the installer flavour requested by the user.
-            if (pass == 0 && profile.graphical != graphicalInstaller) continue;
-            if (!iso.ContainsFile(profile.kernel) || !iso.ContainsFile(profile.initrd)) continue;
-            BootSelection selection;
-            selection.image.kernel = iso.ReadWholeFile(profile.kernel);
-            selection.image.initrd = iso.ReadWholeFile(profile.initrd);
-            std::string arguments = profile.arguments;
-            std::string label = iso.VolumeLabel();
-            std::string escaped;
-            for (const char character : label) {
-                if (character == ' ') escaped += "\\x20";
-                else escaped.push_back(character);
-            }
-            for (std::size_t position; (position = arguments.find("{LABEL}")) != std::string::npos;) {
-                arguments.replace(position, 7, escaped);
-            }
-            selection.image.commandLine = arguments;
-            selection.description = std::string(profile.description) + " (" + profile.kernel + ")";
-            return selection;
+    std::string label;
+    for (const char character : iso.VolumeLabel()) {
+        if (character == ' ') label += "\\x20";
+        else label.push_back(character);
+    }
+    const auto select = [&](const Profile& profile) {
+        BootSelection selection;
+        selection.image.kernel = iso.ReadWholeFile(profile.kernel);
+        selection.image.initrd = iso.ReadWholeFile(profile.initrd);
+        std::string arguments = profile.arguments;
+        for (std::size_t position; (position = arguments.find("{LABEL}")) != std::string::npos;) {
+            arguments.replace(position, 7, label);
         }
+        selection.image.commandLine = arguments;
+        selection.description = std::string(profile.description) + " (" + profile.kernel + ")";
+        return selection;
+    };
+    const auto present = [&](const Profile& profile) {
+        return iso.ContainsFile(profile.kernel) && iso.ContainsFile(profile.initrd);
+    };
+
+    if (present(debian[0])) return select(debian[0]);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (std::size_t index = 1; index < debian.size(); ++index) {
+            // First pass honours the installer flavour requested by the user.
+            if (pass == 0 && debian[index].graphical != graphicalInstaller) continue;
+            if (present(debian[index])) return select(debian[index]);
+        }
+    }
+
+    // Any other distribution: what its own GRUB menu would boot (first
+    // entry with a kernel), as on a real PC.
+    for (const char* config : {"boot/grub2/grub.cfg", "boot/grub/grub.cfg", "EFI/BOOT/grub.cfg"}) {
+        if (!iso.ContainsFile(config)) continue;
+        const auto data = iso.ReadWholeFile(config);
+        const auto entry = ParseGrubConfig(std::string(data.begin(), data.end()));
+        if (!entry || entry->initrd.empty() || !iso.ContainsFile(entry->kernel) || !iso.ContainsFile(entry->initrd)) continue;
+        BootSelection selection;
+        selection.image.kernel = iso.ReadWholeFile(entry->kernel);
+        selection.image.initrd = iso.ReadWholeFile(entry->initrd);
+        selection.image.commandLine = entry->arguments;
+        selection.description = std::string("menu de démarrage de l'ISO (") + config + " : " + entry->kernel + ")";
+        return selection;
+    }
+
+    for (const auto& profile : others) {
+        if (present(profile)) return select(profile);
     }
     return std::nullopt;
 }
