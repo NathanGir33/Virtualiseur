@@ -51,6 +51,7 @@ class Virtio9p;
 class FirmwareFlash;
 class FwCfg;
 class FirmwareDebugPort;
+struct AcpiConfig;
 
 enum class DiskBus { Virtio, Ide };
 // Network card attachment, as in VirtualBox.
@@ -244,7 +245,7 @@ private:
     void HandleMmioExit(VcpuContext& context, const WHV_RUN_VP_EXIT_CONTEXT& exit);
     void HandleHaltExit(std::uint32_t index);
     void HandleMsrExit(std::uint32_t index, const WHV_RUN_VP_EXIT_CONTEXT& exit);
-    void SetupFirmware();
+    void SetupFirmware(const AcpiConfig& acpi);
     void RequestStop(VmExit reason);
     void CancelAll();
 

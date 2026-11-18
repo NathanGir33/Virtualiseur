@@ -2,6 +2,7 @@
 
 #include "../core/Log.h"
 
+#include <cstdio>
 #include <cstring>
 
 namespace vmm {
@@ -51,7 +52,29 @@ void SetupFirmwareResetCpu(virtualiseur::whp::Partition& partition, std::uint32_
     partition.SetVirtualProcessorRegisters(index, names, values);
 }
 
-void ConfigureFwCfg(FwCfg& fwCfg, const GuestMemory& memory, std::uint32_t cpus, const std::array<std::uint8_t, 16>& uuid)
+namespace {
+
+std::string Hex(std::uint32_t value)
+{
+    char text[16]{};
+    std::snprintf(text, sizeof(text), "%x", value); // Lowercase, no "0x".
+    return text;
+}
+
+} // namespace
+
+std::string OfwIdePath(std::uint32_t channel, std::uint32_t unit)
+{
+    return "/pci@i0cf8/ide@1,1/drive@" + Hex(channel) + "/disk@" + Hex(unit);
+}
+
+std::string OfwVirtioBlkPath(std::uint8_t slot, std::uint8_t function)
+{
+    return "/pci@i0cf8/scsi@" + Hex(slot) + (function != 0 ? "," + Hex(function) : std::string()) + "/disk@0,0";
+}
+
+void ConfigureFwCfg(FwCfg& fwCfg, const GuestMemory& memory, std::uint32_t cpus, const std::array<std::uint8_t, 16>& uuid,
+                    const AcpiTableSet& acpi, const std::vector<std::string>& bootOrder)
 {
     fwCfg.AddItem(0x00, {'Q', 'E', 'M', 'U'});
     fwCfg.AddItem(0x01, {0x03, 0x00, 0x00, 0x00}); // Traditional interface + DMA.
@@ -74,6 +97,19 @@ void ConfigureFwCfg(FwCfg& fwCfg, const GuestMemory& memory, std::uint32_t cpus,
     add(0, memory.LowRamEnd(), 1);
     if (memory.HighRamBytes() != 0) add(layout::kFourGiB, memory.HighRamBytes(), 1);
     fwCfg.AddFile("etc/e820", std::move(e820));
+
+    // ACPI: OVMF allocates both blobs, runs the loader script and installs
+    // the tables (Linux then finds them through the EFI system table).
+    fwCfg.AddFile(std::string(kAcpiRsdpFile), acpi.rsdp);
+    fwCfg.AddFile(std::string(kAcpiTablesFile), acpi.tables);
+    fwCfg.AddFile(std::string(kTableLoaderFile), BuildTableLoader(acpi));
+
+    // Boot order: one Open Firmware path per line, NUL-terminated (QEMU).
+    std::string order;
+    for (const auto& path : bootOrder) order += path + "\n";
+    std::vector<std::uint8_t> bootorder(order.begin(), order.end());
+    bootorder.push_back(0);
+    fwCfg.AddFile("bootorder", std::move(bootorder));
     fwCfg.Finalize();
 }
 

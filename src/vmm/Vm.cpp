@@ -68,6 +68,9 @@ void AppendArgument(std::string& commandLine, const std::string& argument)
 // kVirtioMmioBase + slot * 64 KiB, inside the PCI root window (_CRS).
 constexpr std::uint8_t kVirtioNetSlot = 3;
 constexpr std::uint8_t kVirtioBlkSlot = 4;
+// The CD-ROM: IDE secondary channel, master (also its bootorder path).
+constexpr std::uint32_t kCdromChannel = 1;
+constexpr std::uint32_t kCdromUnit = 0;
 constexpr std::uint8_t kVirtioGpuSlot = 5;
 constexpr std::uint8_t kVirtioTabletSlot = 6;
 constexpr std::uint8_t kVirtioSerialSlot = 7;
@@ -281,7 +284,7 @@ void Vm::BuildDevices()
     if (disk_ && config_.diskBus == DiskBus::Ide) ide_->AttachDisk(0, &*disk_);
     // The CD-ROM drive is always there, empty or not, so a disc can be
     // inserted while the VM runs.
-    ide_->AttachCdrom(1, iso_.get());
+    ide_->AttachCdrom(kCdromChannel, iso_.get());
     if (config_.firmware == Firmware::Uefi) ide_->SetEmptyChannelReadsZero(true);
 
     if (config_.firmware == Firmware::Uefi) {
@@ -444,14 +447,14 @@ void Vm::BuildDevices()
     if (config_.firmware == Firmware::Uefi) {
         // ACPI tables reach OVMF through fw_cfg "etc/table-loader" (B2);
         // until then OVMF installs its own built-in tables.
-        SetupFirmware();
+        SetupFirmware(acpi);
         return;
     }
     const auto rsdp = BuildAcpiTables(*memory_, acpi);
     (void)rsdp;
 }
 
-void Vm::SetupFirmware()
+void Vm::SetupFirmware(const AcpiConfig& acpi)
 {
     const auto vmmDirectory = [] {
         std::wstring path(32768, L'\0');
@@ -489,7 +492,23 @@ void Vm::SetupFirmware()
         uuid[8] = static_cast<std::uint8_t>((uuid[8] & 0x3F) | 0x80);
     }
     fwCfg_ = std::make_unique<FwCfg>(*memory_);
-    ConfigureFwCfg(*fwCfg_, *memory_, config_.cpus, uuid);
+    // Boot order for OVMF (QemuBootOrderLib): the disk (virtio-blk or IDE
+    // primary master), the CD-ROM (the channel it is really attached to);
+    // CD first when asked, or when there is no disk.
+    std::vector<std::string> bootOrder;
+    std::string diskPath;
+    if (disk_) diskPath = config_.diskBus == DiskBus::Virtio ? OfwVirtioBlkPath(kVirtioBlkSlot) : OfwIdePath(0, 0);
+    const auto cdromPath = OfwIdePath(kCdromChannel, kCdromUnit);
+    if (config_.boot == BootDevice::Cdrom || diskPath.empty()) {
+        bootOrder = {cdromPath};
+        if (!diskPath.empty()) bootOrder.push_back(diskPath);
+    } else {
+        bootOrder = {diskPath, cdromPath};
+    }
+    std::string orderText;
+    for (const auto& path : bootOrder) orderText += (orderText.empty() ? "" : ", ") + path;
+    VMM_INFO("Firmware UEFI : ordre de démarrage %s.", orderText.c_str());
+    ConfigureFwCfg(*fwCfg_, *memory_, config_.cpus, uuid, BuildAcpiTableSet(acpi), bootOrder);
     ioBus_.Register(FwCfg::kSelectorPort, 2, fwCfg_.get());
     ioBus_.Register(FwCfg::kDmaPort, 8, fwCfg_.get());
     if (config_.uefiDebug) {
