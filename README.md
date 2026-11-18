@@ -2,6 +2,19 @@
 
 Hyperviseur de type 2 pour Windows 11, dans l'esprit de VirtualBox, construit sur **Windows Hypervisor Platform (WHP)**. Windows garde la main sur la virtualisation matérielle : Hyper-V, VBS et l'intégrité de la mémoire restent activés. Virtualiseur fournit le reste : le moniteur de machine virtuelle (VMM), les périphériques virtuels, l'affichage et le gestionnaire de VM.
 
+![Le gestionnaire de Virtualiseur : une VM Debian 13 GNOME en marche, avec l'aperçu de son écran](docs/images/gestionnaire-clair.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/machine-gnome.png" alt="Fenêtre d'une machine virtuelle : Debian 13 GNOME accélérée en 3D (virgl)"></td>
+    <td width="50%"><img src="docs/images/gestionnaire-sombre.png" alt="Le gestionnaire en thème sombre"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Debian 13 GNOME dans sa fenêtre, accéléré en 3D (virgl)</sub></td>
+    <td align="center"><sub>Le gestionnaire en thème sombre</sub></td>
+  </tr>
+</table>
+
 ## Ce qui fonctionne
 
 - **Installation complète de Debian 13** depuis l'ISO netinst, en mode texte ou avec l'installateur graphique, puis démarrage du système installé depuis le disque virtuel, sans BIOS ni QEMU.
@@ -21,8 +34,9 @@ Hyperviseur de type 2 pour Windows 11, dans l'esprit de VirtualBox, construit su
   - **réseau interne** entre VM d'un même nom, porté par du multicast local sur 127.0.0.1 ;
   - **réseau privé hôte** (machine isolée, joignable par redirections de ports) et **câble débranché**.
 - **ACPI** : arrêt propre via le bouton d'alimentation, extinction S5, redémarrage, timer PM et routage PCI (`_PRT`).
-- **Gestionnaire de VM** dans l'esprit de VirtualBox, en **thème clair, sombre ou celui de Windows** (menu *Affichage*, changement immédiat), avec des couleurs qui ont un sens : pastille d'état de chaque machine (vert en marche, orange en pause, gris éteinte), une couleur par catégorie de réglages, actions destructives en rouge ; barre d'outils, liste des machines avec leur état, panneau de détails par section, fenêtre de configuration par catégories (Général, Système, Affichage, Stockage, Audio, Réseau, Installation) avec curseurs pour la RAM, les vCPU et le disque, et zones vert/orange/rouge selon les ressources de l'hôte. Création guidée depuis une ISO (système détecté d'après son nom), agrandissement du disque, pause/reprise, arrêt ACPI, redémarrage, extinction forcée, journal, suppression d'une VM avec son disque.
-- **Installation automatique** : un fichier preseed Debian est injecté dans l'initrd (`--preseed`).
+- **Gestionnaire de VM** dans l'esprit de VirtualBox, en **thème clair, sombre ou celui de Windows** (menu *Affichage*, changement immédiat), avec des couleurs qui ont un sens : pastille d'état de chaque machine (vert en marche, orange en pause, gris éteinte), une couleur par catégorie de réglages, actions destructives en rouge ; barre d'outils, liste des machines avec leur état, panneau de détails par section, fenêtre de configuration par catégories (Général, Système, Affichage, Stockage, Audio, Réseau, Dossiers partagés, Installation) avec curseurs pour la RAM, les vCPU et le disque, et zones vert/orange/rouge selon les ressources de l'hôte. Création guidée depuis une ISO (système détecté d'après son nom), agrandissement du disque, pause/reprise, arrêt ACPI, redémarrage, extinction forcée, journal, suppression d'une VM avec son disque.
+- **Installation automatique** : un fichier preseed Debian est injecté dans l'initrd (`--preseed`). Les **outils invité** (`--guest-tools`, activés par défaut) ajoutent à l'installation Debian `qemu-guest-agent` (heure, gel des disques pour les instantanés, montage des dossiers partagés) et, avec un bureau, `spice-vdagent` (presse-papiers, dépôt de fichiers). Sur un système déjà installé : `sudo apt install qemu-guest-agent spice-vdagent`.
+- **Performances** : virtio moderne avec **MSI-X** partout, notifications par **doorbells WHP** (sans sortie VM), *enlightenments* Hyper-V (page TSC de référence, timers synthétiques directs), verrous par périphérique, et 3D sans relecture de l'image (partage de texture OpenGL/Direct3D, `WGL_NV_DX_interop2`).
 - **Instantanés de disque** : fenêtre *Instantanés* du gestionnaire (prendre, restaurer, supprimer, en arbre) ; prise possible machine allumée, systèmes de fichiers gelés par qemu-guest-agent (sinon « cohérent après plantage ») ; **clones** complets (disque aplati, sparse) ou liés (couche sur un instantané de la source, protégée tant que le clone existe) ; format en couches de 64 Kio sans droits administrateur, le `disk.img` existant devient la base. Pas d'instantané de la mémoire (l'état 3D virgl ne se sauvegarde pas).
 - **Export / import** (`.vrtx`) : *Machine → Exporter…* (ou bouton *Exporter…* de la fenêtre Instantanés, pour un instantané) écrit un seul fichier avec la configuration et un état du disque aplati, sans l'historique ; blocs de 64 Kio compressés XPRESS (stockés bruts s'ils sont incompressibles), CRC32 par bloc. *Fichier → Importer une machine…* vérifie tout, recrée un `disk.img` sparse et donne une nouvelle adresse MAC et un nouvel identifiant ; en cas d'erreur ou d'annulation, rien n'est laissé.
 - **Aperçu de l'écran** : la fiche d'une machine allumée montre une vignette de son écran, rafraîchie toutes les 2 s.
@@ -70,17 +84,22 @@ VirtualiseurVM.exe --name Debian --memory 2048 --cpus 2 `
 
 ```
 src/
-  backend/whp/   Bibliothèque WHP : partition, vCPU, mémoire, ISO 9660, disque brut
+  backend/whp/   Bibliothèque WHP : partition, vCPU, mémoire, ISO 9660 ; disque brut
+                 sparse ou en couches (VirtualDisk, DiskLayer), instantanés et clones
+                 (DiskSnapshots), export/import .vrtx (MachineArchive)
   vmm/           VirtualiseurVM.exe, le moniteur de machine virtuelle
-    core/        bus E/S et MMIO, mémoire invitée, journal
+    core/        bus E/S et MMIO, mémoire invitée, journal, texture partagée 3D,
+                 vignettes PNG
     devices/     IOAPIC, PIT, RTC, UART 16550A, PS/2, ACPI PM, PCI, IDE/ATAPI,
                  virtio-blk, virtio-net, virtio-gpu (virgl), virtio-input,
-                 virtio-serial, virtio-sound
-    audio/       sortie WASAPI (son de l'invité vers Windows)
+                 virtio-serial, virtio-sound, virtio-9p
+    audio/       WASAPI : son de l'invité vers Windows, micro de l'hôte vers l'invité
+    agent/       spice-vdagent (presse-papiers, fichiers) et qemu-guest-agent (heure, gel)
+    share/       serveur 9P2000.L des dossiers partagés
     firmware/    tables ACPI et DSDT généré en AML
     boot/        protocole de démarrage Linux, profils ISO, lecteur ext2/3/4 et grub.cfg
-    net/         NAT libslirp
-    ui/          fenêtre d'affichage
+    net/         NAT libslirp, pont Npcap, réseau interne
+    ui/          fenêtre d'affichage, presse-papiers
   app/VirtualiseurManager/   gestionnaire de VM (Win32) : bibliothèque (VmLibrary),
                              thème et dessin (Ui), fenêtres de configuration (Dialogs)
 ```
@@ -93,6 +112,14 @@ Le code de Virtualiseur est publié sous licence [MIT](LICENSE).
 
 libslirp (BSD-3-Clause) et ses dépendances (glib : LGPL-2.1+) sont restaurées par vcpkg. virglrenderer et libepoxy (MIT), libwinpthread (MIT/BSD) et libgcc_s (GPL avec exception d'exécution) viennent de MSYS2. Il faut lire leurs notices avant toute redistribution publique. QEMU n'est ni inclus ni utilisé : Virtualiseur a son propre moteur.
 
+## Limites connues
+
+- Invités **Linux** seulement, avec le noyau et l'initrd sur une partition ext2/3/4 (pas de `/boot` en Btrfs, XFS, LVM ou chiffré). Pas encore d'UEFI, donc pas de Windows invité.
+- Instantanés du disque seulement, sans la mémoire ; restaurer ou supprimer un instantané demande d'éteindre la machine.
+- 3D en OpenGL (virgl) seulement : ni Vulkan ni décodage vidéo matériel. Son en 16 bits.
+- Accès par pont en Wi-Fi selon le réseau et le pilote ; pas d'IPv6 dans ce cas.
+- Dossiers partagés sans liens symboliques ni verrous de fichiers.
+
 ## Feuille de route
 
 1. Valider le NAT libslirp sur plusieurs versions de Windows (téléchargements apt, mises à jour).
@@ -100,4 +127,4 @@ libslirp (BSD-3-Clause) et ses dépendances (glib : LGPL-2.1+) sont restaurées 
 3. Firmware UEFI (OVMF) pour les ISO non Linux et les invités Windows.
 4. Signature et installateur pour une distribution grand public.
 
-Pistes pour la 3D : afficher directement la texture de l'invité, sans relecture (partage WGL/Direct3D) ; Vulkan avec Venus. WHP ne permet pas de donner le GPU à la VM (GPU-P et DDA sont réservés à Hyper-V).
+Pistes : Vulkan avec Venus pour la 3D ; `VIRTIO_RING_F_EVENT_IDX` (moins de notifications sous charge) ; reporter dans `vm.ini` l'ISO et le câble changés à chaud. WHP ne permet pas de donner le GPU à la VM (GPU-P et DDA sont réservés à Hyper-V).
