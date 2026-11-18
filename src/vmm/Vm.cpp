@@ -499,7 +499,9 @@ void Vm::SetupFirmware(const AcpiConfig& acpi)
     std::string diskPath;
     if (disk_) diskPath = config_.diskBus == DiskBus::Virtio ? OfwVirtioBlkPath(kVirtioBlkSlot) : OfwIdePath(0, 0);
     const auto cdromPath = OfwIdePath(kCdromChannel, kCdromUnit);
-    if (config_.boot == BootDevice::Cdrom || diskPath.empty()) {
+    // An empty drive goes last: after the installer's ISO is ejected, the
+    // disk (and its NVRAM boot entries) comes first at the next start.
+    if ((config_.boot == BootDevice::Cdrom && iso_) || diskPath.empty()) {
         bootOrder = {cdromPath};
         if (!diskPath.empty()) bootOrder.push_back(diskPath);
     } else {
@@ -662,6 +664,12 @@ VmExit Vm::Wait()
 {
     for (auto& thread : vcpus_) {
         if (thread.joinable()) thread.join();
+    }
+    // UEFI variables (efibootmgr, shim...) on disk before anything else:
+    // the vCPUs are stopped, a reset recreates the VM from vars.fd.
+    if (flash_ && flash_->Flush()) {
+        VMM_INFO("Firmware UEFI : variables écrites dans vars.fd avant %s.",
+                 exitReason_.load() == VmExit::Reset ? "le redémarrage" : "l'arrêt");
     }
     state_ = VmState::Stopped;
     return exitReason_.load();

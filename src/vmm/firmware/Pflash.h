@@ -60,8 +60,10 @@ public:
     std::uint64_t MmioRead(std::uint64_t address, std::uint8_t size) override;
     void MmioWrite(std::uint64_t address, std::uint8_t size, std::uint64_t value) override;
 
-    // Writes the store now if it changed (also done by the destructor).
-    void Flush();
+    // Writes the store now, synchronously, if it changed; true if it wrote.
+    // Called as soon as the vCPUs stop (guest reset through 0xCF9 or the
+    // ACPI reset register, power off) and by the destructor.
+    bool Flush();
 
 private:
     enum class Mode : std::uint8_t { Array, Status, Query, Identify };
@@ -93,6 +95,7 @@ private:
     bool codeWriteReported_ = false;
 
     // Write-back.
+    std::mutex writeMutex_; // One write of vars.fd at a time; lock order: writeMutex_, lock_, flushMutex_.
     std::mutex flushMutex_;
     std::condition_variable flushWake_;
     bool dirty_ = false;

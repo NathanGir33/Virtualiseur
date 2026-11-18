@@ -103,7 +103,7 @@ FirmwareFlash::~FirmwareFlash()
     }
     flushWake_.notify_all();
     if (flusher_.joinable()) flusher_.join();
-    Flush(); // Last burst: the VM stops or resets.
+    (void)Flush(); // Last burst, if Vm::Wait did not already write it.
     // The partition is deleted before its devices: unmapping is moot then.
     if (code_ != nullptr) VirtualFree(code_, 0, MEM_RELEASE);
     if (vars_ != nullptr) VirtualFree(vars_, 0, MEM_RELEASE);
@@ -230,37 +230,46 @@ void FirmwareFlash::FlushWorker()
         const bool overdue = now - firstChange_ >= std::chrono::seconds(1);
         if (!quiet && !overdue) continue;
         guard.unlock();
-        std::vector<std::uint8_t> copy;
         {
-            const DeviceGuard device(lock_);
-            // End of a burst: the firmware is back in read array mode.
-            if (mode_ == Mode::Array || overdue) {
-                const std::lock_guard state(flushMutex_);
-                dirty_ = false;
-                copy.assign(vars_, vars_ + varsSize_);
+            // Held from the copy to the end of the write: Flush() waits for it.
+            const std::lock_guard writing(writeMutex_);
+            std::vector<std::uint8_t> copy;
+            {
+                const DeviceGuard device(lock_);
+                // End of a burst: the firmware is back in read array mode.
+                if (mode_ == Mode::Array || overdue) {
+                    const std::lock_guard state(flushMutex_);
+                    if (dirty_) copy.assign(vars_, vars_ + varsSize_);
+                    dirty_ = false;
+                }
             }
-        }
-        if (!copy.empty() && !WriteStore(copy)) {
-            const std::lock_guard state(flushMutex_);
-            dirty_ = true; // Retried at the next change or at the end.
+            if (!copy.empty() && !WriteStore(copy)) {
+                const std::lock_guard state(flushMutex_);
+                dirty_ = true; // Retried at the next change or at the end.
+            }
         }
         guard.lock();
     }
 }
 
-void FirmwareFlash::Flush()
+bool FirmwareFlash::Flush()
 {
+    // Synchronous: a write-back in progress finishes first (writeMutex_),
+    // then whatever is still dirty is written before returning.
+    const std::lock_guard writing(writeMutex_);
     std::vector<std::uint8_t> copy;
     {
         const DeviceGuard device(lock_);
         const std::lock_guard state(flushMutex_);
-        if (!dirty_) return;
+        if (!dirty_) return false;
         dirty_ = false;
         copy.assign(vars_, vars_ + varsSize_);
     }
-    if (!WriteStore(copy)) {
+    if (WriteStore(copy)) return true;
+    {
         const std::lock_guard state(flushMutex_);
         dirty_ = true;
+        return false;
     }
 }
 
