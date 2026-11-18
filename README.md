@@ -89,6 +89,8 @@ Le [README du VMM](src/vmm/README.md) décrit le modèle d'exécution, les inter
 
 ## Licences
 
+Le code de Virtualiseur est publié sous licence [MIT](LICENSE).
+
 libslirp (BSD-3-Clause) et ses dépendances (glib : LGPL-2.1+) sont restaurées par vcpkg. virglrenderer et libepoxy (MIT), libwinpthread (MIT/BSD) et libgcc_s (GPL avec exception d'exécution) viennent de MSYS2. Il faut lire leurs notices avant toute redistribution publique. QEMU n'est ni inclus ni utilisé : Virtualiseur a son propre moteur.
 
 ## Feuille de route
