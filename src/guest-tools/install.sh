@@ -173,9 +173,28 @@ fi
 install_packages() {
     case $manager in
     apt-get)
+        # The installation CD often stays listed ("deb cdrom:", still active
+        # during the Debian installer's late command): apt would then wait
+        # for someone to insert it. A copy of the list without those lines,
+        # and no terminal input: nothing can stop on a question.
+        apt_list=/etc/apt/sources.list
+        apt_copy=
+        if grep -q '^[[:space:]]*deb[[:space:]]\{1,\}cdrom:' /etc/apt/sources.list 2>/dev/null; then
+            apt_copy=$(mktemp 2>/dev/null) || apt_copy=/tmp/virtualiseur-sources.list
+            grep -v '^[[:space:]]*deb[[:space:]]\{1,\}cdrom:' /etc/apt/sources.list > "$apt_copy"
+            apt_list=$apt_copy
+        fi
         # Right after boot a desktop updates itself: wait for its lock (5 min).
-        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -q &&
-            DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q "$@" ;;
+        # One unreachable source makes update fail while the others are
+        # refreshed: install anyway; with no working source, install fails.
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 -o "Dir::Etc::SourceList=$apt_list" \
+            update -q < /dev/null ||
+            say "  (apt-get update a signalé une source inaccessible ; installation tentée quand même)"
+        apt_status=0
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 -o "Dir::Etc::SourceList=$apt_list" \
+            install -y -q "$@" < /dev/null || apt_status=$?
+        [ -n "$apt_copy" ] && rm -f "$apt_copy"
+        return $apt_status ;;
     dnf) dnf install -y "$@" ;;
     yum) yum install -y "$@" ;;
     zypper) ZYPP_LOCK_TIMEOUT=300 zypper --non-interactive --gpg-auto-import-keys install "$@" ;;
