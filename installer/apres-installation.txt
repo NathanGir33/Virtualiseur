@@ -4,7 +4,8 @@ PREMIER DÉMARRAGE
 
 - Si l'installation a activé la « Plateforme de l'hyperviseur Windows », redémarrez Windows avant de lancer une machine virtuelle.
 - Sur un PC à processeur AMD, la virtualisation doit aussi être activée dans le BIOS/UEFI (option « SVM Mode » ou « AMD-V »). Sur Intel : « Intel Virtualization Technology (VT-x) ».
-- Lancez Virtualiseur depuis le menu Démarrer, cliquez sur « Nouvelle », choisissez une image ISO Linux (par exemple Debian 13), réglez la mémoire, les processeurs et le disque, puis « Créer ».
+- Lancez Virtualiseur depuis le menu Démarrer, cliquez sur « Nouvelle », choisissez une image ISO Linux (Debian, Ubuntu, Fedora, openSUSE, Arch...), réglez la mémoire, les processeurs et le disque, puis « Créer ». La machine démarre en UEFI, comme un PC : le menu de l'ISO s'affiche, puis l'installateur de la distribution.
+- Une fois le système installé : menu Machine → « Insérer le CD des outils invité », puis dans la machine « sh install.sh » depuis le CD (presse-papiers, dossiers partagés, heure, instantanés à chaud).
 
 OÙ SONT LES MACHINES ?
 

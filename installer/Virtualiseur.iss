@@ -8,7 +8,7 @@
 ; Documents\Virtualiseur\VMs : la désinstallation propose de les supprimer.
 
 #define AppName "Virtualiseur"
-#define AppVersion "0.3.0"
+#define AppVersion "0.4.0"
 #define AppExe "VirtualiseurManager.exe"
 ; Npcap (accès par pont) ne peut pas être redistribué : lien vers son site.
 #define NpcapUrl "https://npcap.com/#download"

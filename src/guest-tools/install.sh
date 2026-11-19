@@ -14,7 +14,7 @@
 # and a boot service (systemd or OpenRC) that mounts every virtio-9p shared
 # folder of the VM on /mnt/<tag>.
 
-VERSION=0.3.0
+VERSION=0.4.0
 SERVICE=virtualiseur-shares
 MOUNT_SCRIPT=/usr/local/sbin/virtualiseur-mount-shares
 
